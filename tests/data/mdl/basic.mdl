@@ -1,0 +1,15 @@
+mdl 1.0;
+
+import df::*;
+
+export material basic(
+    color base_color = color(0.8, 0.3, 0.1),
+    float roughness = 0.25
+) = material(
+    surface: material_surface(
+        scattering: df::diffuse_reflection_bsdf(
+            tint: base_color,
+            roughness: roughness
+        )
+    )
+);
