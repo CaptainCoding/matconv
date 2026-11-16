@@ -75,6 +75,7 @@ if(MATCONV_WITH_SDK)
         MATCONV_WITH_SDK=1
         MATCONV_MDL_SDK_MODULE="$<TARGET_FILE:mdl::mdl_sdk>"
         MATCONV_MDL_STANDARD_PATH="${_mdl_sdk_source_dir}/src/shaders/mdl"
+        MATCONV_MATERIALX_MDL_PATH="${matconv_materialx_SOURCE_DIR}/source/MaterialXGenMdl/mdl"
         MATCONV_MATERIALX_SOURCE_DIR="${matconv_materialx_SOURCE_DIR}"
     )
     target_include_directories(matconv PRIVATE "${MDL_INCLUDE_FOLDER}")
@@ -128,11 +129,29 @@ if(BUILD_TESTING)
                 --material basic
                 --mdl-path "${CMAKE_CURRENT_SOURCE_DIR}/tests/data"
         )
+        add_test(NAME matconv_mdl_to_mtlx_slots
+            COMMAND "${CMAKE_COMMAND}"
+                "-DMATCONV_EXECUTABLE=$<TARGET_FILE:matconv>"
+                "-DMDL_INPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mdl/slots.mdl"
+                "-DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/slots.mtlx"
+                "-DMATERIAL=slots"
+                "-DMDL_PATH=${CMAKE_CURRENT_SOURCE_DIR}/tests/data"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_mdl_to_mtlx.cmake"
+        )
         add_test(NAME matconv_mtlx_to_mdl
             COMMAND matconv mtlx-to-mdl
                 --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/basic.mtlx"
                 --output "${CMAKE_CURRENT_BINARY_DIR}/basic.mdl"
                 --material basic
+        )
+        add_test(NAME matconv_generated_mdl_roundtrip
+            COMMAND "${CMAKE_COMMAND}"
+                "-DMATCONV_EXECUTABLE=$<TARGET_FILE:matconv>"
+                "-DMDL_OUTPUT=${CMAKE_CURRENT_BINARY_DIR}/generated_basic.mdl"
+                "-DMTLX_OUTPUT=${CMAKE_CURRENT_BINARY_DIR}/generated_basic_roundtrip.mtlx"
+                "-DMDL_INPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/data/basic.mtlx"
+                "-DMATERIAL=basic"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_generated_mdl_roundtrip.cmake"
         )
     endif()
 endif()

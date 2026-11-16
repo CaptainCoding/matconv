@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<materialx version="1.39">
+  <nodegraph name="basic_graph">
+    <surface name="surface_shader" type="surfaceshader">
+      <input name="bsdf" type="BSDF" nodename="oren_nayar_diffuse_bsdf_0" />
+      <input name="edf" type="EDF" value="" />
+      <input name="opacity" type="float" nodename="constant_1" />
+      <input name="thin_walled" type="boolean" value="false" />
+    </surface>
+    <input name="base_color" type="color3" value="0.800000012, 0.300000012, 0.100000001" />
+    <input name="roughness" type="float" value="0.25" />
+    <oren_nayar_diffuse_bsdf name="oren_nayar_diffuse_bsdf_0" type="BSDF">
+      <input name="weight" type="float" value="1.0" />
+      <input name="color" type="color3" interfacename="base_color" />
+      <input name="roughness" type="float" interfacename="roughness" />
+      <input name="normal" type="vector3" nodename="geompropvalue_2" />
+      <input name="energy_compensation" type="boolean" value="false" />
+    </oren_nayar_diffuse_bsdf>
+    <geompropvalue name="oren_nayar_diffuse_bsdf_0_normal_geom" type="vector3">
+      <input name="geomprop" type="string" value="Nworld" />
+      <input name="default" type="vector3" value="0.0, 0.0, 0.0" />
+    </geompropvalue>
+    <constant name="constant_1" type="float">
+      <input name="value" type="float" value="1" />
+    </constant>
+    <output name="surface_output" type="surfaceshader" nodename="surface_shader" />
+    <geompropvalue name="geompropvalue_2" type="vector3">
+      <input name="geomprop" type="string" value="Nworld" />
+      <input name="default" type="vector3" value="0.0, 0.0, 0.0" />
+    </geompropvalue>
+  </nodegraph>
+  <surfacematerial name="basic" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodegraph="basic_graph" output="surface_output" />
+  </surfacematerial>
+</materialx>

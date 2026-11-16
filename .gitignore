@@ -1,4 +1,8 @@
 /build/
 /build-deps/
 /cmake-build-*/
+/demo/gpuopen/catalog/
+/demo/gpuopen/submodels/
+all_materials.usda
 .DS_Store
+**/__pycache__/

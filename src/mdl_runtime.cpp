@@ -156,6 +156,9 @@ private:
     if (configuration->add_mdl_path(MATCONV_MDL_STANDARD_PATH) != 0)
       throw std::runtime_error(
           "Could not add the MDL SDK standard module path.");
+    if (configuration->add_mdl_path(MATCONV_MATERIALX_MDL_PATH) != 0)
+      throw std::runtime_error(
+          "Could not add the MaterialX MDL support module path.");
     configuration->add_mdl_system_paths();
   }
 

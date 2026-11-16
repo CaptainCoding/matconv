@@ -1,0 +1,30 @@
+mdl 1.0;
+
+import df::*;
+import math::*;
+import state::*;
+
+export material slots(
+    color tint = color(0.7, 0.4, 0.2),
+    color emission_intensity = color(2.0),
+    float opacity = 0.8,
+    float displacement = 0.01,
+    uniform bool thin = true
+) = material(
+    surface: material_surface(
+        scattering: df::diffuse_reflection_bsdf(tint: tint),
+        emission: material_emission(
+            emission: df::diffuse_edf(),
+            intensity: emission_intensity
+        )
+    ),
+    backface: material_surface(
+        scattering: df::diffuse_reflection_bsdf(tint: tint)
+    ),
+    geometry: material_geometry(
+        displacement: float3(0.0, 0.0, displacement),
+        normal: state::normal(),
+        cutout_opacity: math::clamp(opacity, 0.0, 1.0)
+    ),
+    thin_walled: thin
+);
