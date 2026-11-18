@@ -1,0 +1,19 @@
+mdl 1.7;
+
+import ::df::*;
+
+export material thin_film() = let {
+    bsdf base = df::microfacet_ggx_smith_bsdf(
+        roughness_u: 0.12,
+        tint: color(0.82),
+        multiscatter_tint: color(0.0)
+    );
+} in material(
+    surface: material_surface(
+        scattering: df::thin_film(
+            thickness: 420.0,
+            ior: color(1.33),
+            base: base
+        )
+    )
+);

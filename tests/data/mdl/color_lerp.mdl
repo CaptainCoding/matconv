@@ -1,0 +1,18 @@
+mdl 1.7;
+
+import ::df::*;
+import ::math::*;
+
+export material color_lerp(
+    color blend = color(0.2, 0.65, 0.85)
+) = material(
+    surface: material_surface(
+        scattering: df::diffuse_reflection_bsdf(
+            tint: math::lerp(
+                color(0.06, 0.12, 0.3),
+                color(0.9, 0.4, 0.08),
+                blend
+            )
+        )
+    )
+);

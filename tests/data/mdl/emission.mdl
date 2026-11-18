@@ -1,0 +1,13 @@
+mdl 1.7;
+
+import ::df::*;
+
+export material emission() = material(
+    surface: material_surface(
+        scattering: df::diffuse_reflection_bsdf(tint: color(0.2)),
+        emission: material_emission(
+            emission: df::diffuse_edf(),
+            intensity: color(3.0, 1.2, 0.4)
+        )
+    )
+);

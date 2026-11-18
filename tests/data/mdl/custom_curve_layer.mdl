@@ -1,0 +1,24 @@
+mdl 1.7;
+
+import ::df::*;
+
+export material custom_curve_layer() = let {
+    bsdf base = df::diffuse_reflection_bsdf(
+        tint: color(0.18, 0.42, 0.12)
+    );
+    bsdf coat = df::microfacet_ggx_smith_bsdf(
+        roughness_u: 0.16,
+        tint: color(1.0),
+        multiscatter_tint: color(0.0)
+    );
+} in material(
+    surface: material_surface(
+        scattering: df::custom_curve_layer(
+            normal_reflectivity: 0.04,
+            grazing_reflectivity: 1.0,
+            weight: 0.35,
+            layer: coat,
+            base: base
+        )
+    )
+);

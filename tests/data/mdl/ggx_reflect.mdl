@@ -1,0 +1,18 @@
+mdl 1.7;
+
+import ::df::*;
+
+export material ggx_reflect(
+    float roughness = 0.28,
+    color reflectance = color(0.72, 0.76, 0.82)
+) = material(
+    surface: material_surface(
+        scattering: df::microfacet_ggx_smith_bsdf(
+            roughness_u: roughness,
+            roughness_v: roughness,
+            tint: reflectance,
+            multiscatter_tint: color(0.0),
+            mode: df::scatter_reflect
+        )
+    )
+);

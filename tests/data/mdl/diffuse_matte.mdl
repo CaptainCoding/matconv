@@ -1,0 +1,15 @@
+mdl 1.7;
+
+import ::df::*;
+
+export material diffuse_matte(
+    color albedo = color(0.72, 0.18, 0.06),
+    float roughness = 0.12
+) = material(
+    surface: material_surface(
+        scattering: df::diffuse_reflection_bsdf(
+            tint: albedo,
+            roughness: roughness
+        )
+    )
+);

@@ -1,0 +1,22 @@
+{
+  "name": "matconv",
+  "version-string": "0.1.0",
+  "builtin-baseline": "9ee11c38b14f8d0c6cca9a0c6f8a5d6a0859867f",
+  "features": {
+    "mdl-image-plugin": {
+      "description": "MDL SDK headers and OpenImageIO support for MDL image textures",
+      "dependencies": [
+        "boost-algorithm",
+        "boost-asio",
+        "boost-beast",
+        "boost-core",
+        "boost-dynamic-bitset",
+        "boost-functional",
+        "boost-headers",
+        "boost-intrusive",
+        "boost-unordered",
+        "openimageio"
+      ]
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "mdl-with-image-plugin",
+      "displayName": "MDL SDK with OpenImageIO texture support",
+      "description": "Fetch MDL SDK and MaterialX and build the MDL OpenImageIO plugin.",
+      "binaryDir": "${sourceDir}/build/mdl-with-image-plugin",
+      "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+      "cacheVariables": {
+        "MATCONV_FETCH_DEPENDENCIES": "ON",
+        "VCPKG_MANIFEST_FEATURES": "mdl-image-plugin"
+      }
+    }
+  ]
+}

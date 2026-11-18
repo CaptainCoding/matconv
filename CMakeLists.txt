@@ -11,12 +11,16 @@ if(MATCONV_FETCH_DEPENDENCIES)
 
     include(FetchContent)
 
+    if(VCPKG_INSTALLED_DIR AND VCPKG_TARGET_TRIPLET)
+        set(Boost_ROOT "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}"
+            CACHE PATH "vcpkg Boost headers for the MDL SDK" FORCE)
+    endif()
     set(MDL_BUILD_SDK ON CACHE BOOL "Build the MDL SDK" FORCE)
     set(MDL_BUILD_SDK_EXAMPLES OFF CACHE BOOL "Build MDL SDK examples")
     set(MDL_BUILD_CORE_EXAMPLES OFF CACHE BOOL "Build MDL Core examples")
     set(MDL_BUILD_ARNOLD_PLUGIN OFF CACHE BOOL "Build the MDL Arnold plugin")
     set(MDL_BUILD_DDS_PLUGIN OFF CACHE BOOL "Build the MDL DDS image plugin")
-    set(MDL_BUILD_OPENIMAGEIO_PLUGIN OFF CACHE BOOL "Build the MDL OpenImageIO image plugin")
+    set(MDL_BUILD_OPENIMAGEIO_PLUGIN ON CACHE BOOL "Build the MDL OpenImageIO image plugin" FORCE)
     set(MDL_BUILD_DOCUMENTATION OFF CACHE BOOL "Build MDL SDK documentation")
     set(MDL_ENABLE_UNIT_TESTS OFF CACHE BOOL "Build MDL SDK tests")
 
@@ -31,6 +35,26 @@ if(MATCONV_FETCH_DEPENDENCIES)
     set(MATERIALX_BUILD_DATA_LIBRARY OFF CACHE BOOL "Build the MaterialX data library")
 
     set(_mdl_sdk_source_dir "${CMAKE_BINARY_DIR}/_deps/matconv_mdl_sdk-src")
+
+    find_package(OpenImageIO CONFIG QUIET)
+    if(NOT OpenImageIO_FOUND)
+        message(FATAL_ERROR
+            "The opt-in MDL build requires OpenImageIO. Configure with the "
+            "'mdl-with-image-plugin' preset and VCPKG_ROOT set.")
+    elseif(OpenImageIO_VERSION VERSION_LESS 2.4
+            OR NOT OpenImageIO_VERSION VERSION_LESS 4.0)
+        message(FATAL_ERROR
+            "OpenImageIO ${OpenImageIO_VERSION} is unsupported; MDL SDK 2026 "
+            "requires OpenImageIO >= 2.4 and < 4.0.")
+    endif()
+
+    find_package(OpenEXR CONFIG QUIET)
+    if(NOT OpenEXR_FOUND)
+        message(FATAL_ERROR
+            "The opt-in MDL build requires OpenEXR. Configure with the "
+            "'mdl-with-image-plugin' preset and VCPKG_ROOT set.")
+    endif()
+
     FetchContent_Declare(
         matconv_mdl_sdk
         GIT_REPOSITORY https://github.com/NVIDIA/MDL-SDK.git
@@ -74,6 +98,7 @@ if(MATCONV_WITH_SDK)
     target_compile_definitions(matconv PRIVATE
         MATCONV_WITH_SDK=1
         MATCONV_MDL_SDK_MODULE="$<TARGET_FILE:mdl::mdl_sdk>"
+        MATCONV_MDL_OPENIMAGEIO_PLUGIN="$<TARGET_FILE:shaders-plugin-openimageio>"
         MATCONV_MDL_STANDARD_PATH="${_mdl_sdk_source_dir}/src/shaders/mdl"
         MATCONV_MATERIALX_MDL_PATH="${matconv_materialx_SOURCE_DIR}/source/MaterialXGenMdl/mdl"
         MATCONV_MATERIALX_SOURCE_DIR="${matconv_materialx_SOURCE_DIR}"
@@ -86,7 +111,7 @@ if(MATCONV_WITH_SDK)
         MaterialXGenMdl
         ${CMAKE_DL_LIBS}
     )
-    add_dependencies(matconv mdl::mdl_sdk)
+    add_dependencies(matconv mdl::mdl_sdk shaders-plugin-openimageio)
 else()
     target_compile_definitions(matconv PRIVATE MATCONV_WITH_SDK=0)
 endif()
@@ -122,36 +147,13 @@ if(BUILD_TESTING)
     )
     set_tests_properties(matconv_rejects_mdl_path_for_mtlx_input PROPERTIES WILL_FAIL TRUE)
     if(MATCONV_WITH_SDK)
-        add_test(NAME matconv_mdl_to_mtlx
-            COMMAND matconv mdl-to-mtlx
-                --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mdl/basic.mdl"
-                --output "${CMAKE_CURRENT_BINARY_DIR}/basic.mtlx"
-                --material basic
-                --mdl-path "${CMAKE_CURRENT_SOURCE_DIR}/tests/data"
-        )
-        add_test(NAME matconv_mdl_to_mtlx_slots
+        add_test(NAME matconv_mdl_cases
             COMMAND "${CMAKE_COMMAND}"
                 "-DMATCONV_EXECUTABLE=$<TARGET_FILE:matconv>"
-                "-DMDL_INPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mdl/slots.mdl"
-                "-DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/slots.mtlx"
-                "-DMATERIAL=slots"
-                "-DMDL_PATH=${CMAKE_CURRENT_SOURCE_DIR}/tests/data"
-                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_mdl_to_mtlx.cmake"
-        )
-        add_test(NAME matconv_mtlx_to_mdl
-            COMMAND matconv mtlx-to-mdl
-                --input "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/basic.mtlx"
-                --output "${CMAKE_CURRENT_BINARY_DIR}/basic.mdl"
-                --material basic
-        )
-        add_test(NAME matconv_generated_mdl_roundtrip
-            COMMAND "${CMAKE_COMMAND}"
-                "-DMATCONV_EXECUTABLE=$<TARGET_FILE:matconv>"
-                "-DMDL_OUTPUT=${CMAKE_CURRENT_BINARY_DIR}/generated_basic.mdl"
-                "-DMTLX_OUTPUT=${CMAKE_CURRENT_BINARY_DIR}/generated_basic_roundtrip.mtlx"
-                "-DMDL_INPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/data/basic.mtlx"
-                "-DMATERIAL=basic"
-                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_generated_mdl_roundtrip.cmake"
+                "-DMDL_CASES_DIR=${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mdl"
+                "-DMDL_PATH=${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mdl"
+                "-DOUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/mdl-cases"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_mdl_cases.cmake"
         )
     endif()
 endif()

@@ -3,6 +3,7 @@
 #include <mi/base/handle.h>
 #include <mi/neuraylib/factory.h>
 #include <mi/neuraylib/imdl_configuration.h>
+#include <mi/neuraylib/iplugin_configuration.h>
 
 #include <filesystem>
 #include <iostream>
@@ -122,6 +123,7 @@ public:
   explicit Impl(const Options &options)
       : module_(MATCONV_MDL_SDK_MODULE), neuray_(create_neuray(module_)) {
     configure_paths(options);
+    load_image_plugin();
     if (neuray_->start() != 0)
       throw std::runtime_error("Could not start the MDL SDK runtime.");
   }
@@ -160,6 +162,22 @@ private:
       throw std::runtime_error(
           "Could not add the MaterialX MDL support module path.");
     configuration->add_mdl_system_paths();
+  }
+
+  void load_image_plugin() {
+    mi::base::Handle<mi::neuraylib::IPlugin_configuration> plugin_configuration(
+        neuray_->get_api_component<mi::neuraylib::IPlugin_configuration>());
+    if (!plugin_configuration) {
+      throw std::runtime_error(
+          "The MDL SDK runtime has no plugin configuration component.");
+    }
+
+    if (plugin_configuration->load_plugin_library(
+            MATCONV_MDL_OPENIMAGEIO_PLUGIN) != 0) {
+      throw std::runtime_error(
+          "Could not load the MDL OpenImageIO plugin: " +
+          std::string(MATCONV_MDL_OPENIMAGEIO_PLUGIN));
+    }
   }
 
   MdlSdkModule module_;

@@ -1,0 +1,18 @@
+mdl 1.7;
+
+import ::df::*;
+
+export material ggx_transmit(
+    float roughness = 0.18,
+    color tint = color(0.88, 0.96, 1.0)
+) = material(
+    surface: material_surface(
+        scattering: df::microfacet_ggx_smith_bsdf(
+            roughness_u: roughness,
+            roughness_v: roughness,
+            tint: tint,
+            multiscatter_tint: color(0.0),
+            mode: df::scatter_transmit
+        )
+    )
+);

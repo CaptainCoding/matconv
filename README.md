@@ -24,9 +24,9 @@ diffuse reflection is approximated with `oren_nayar_diffuse_bsdf` (MDL's
 is mapped to `uniform_edf` without guaranteeing equivalent normalization.
 Unsupported expressions and material slots are reported as warnings; an
 unsupported top-level surface BSDF is explicitly replaced with black diffuse
-scattering. Textures, measured distributions, hair, and volume conversion are
-not yet implemented. Generated documents are validated before they are
-written.
+scattering. Texture conversion requires the MDL OpenImageIO plugin; other
+unsupported features include measured distributions, hair, and volume
+conversion. Generated documents are validated before they are written.
 
 ## Build
 
@@ -48,10 +48,21 @@ cmake --build build --parallel 4
 ctest --test-dir build --output-on-failure
 ```
 
-Fetching is opt-in because both dependency source trees and builds are
-substantial. CMake 3.26 or newer is required when fetching. A CMake
-configuration without `-DMATCONV_FETCH_DEPENDENCIES=ON` does not search for or
-link locally installed SDKs, but cannot perform conversions.
+Fetching is opt-in because dependency sources and builds are substantial. CMake
+3.26 or newer is required when fetching. To include MDL image-texture support,
+install or bootstrap vcpkg and configure with `VCPKG_ROOT` pointing to its
+checkout:
+
+```sh
+cmake --preset mdl-with-image-plugin
+cmake --build build/mdl-with-image-plugin --parallel 4
+ctest --test-dir build/mdl-with-image-plugin --output-on-failure
+```
+
+The preset opts into the `mdl-image-plugin` vcpkg feature, which fetches
+OpenImageIO and its dependencies. A configuration without
+`-DMATCONV_FETCH_DEPENDENCIES=ON` does not search for or link locally installed
+SDKs, but cannot perform conversions.
 
 ## Usage
 

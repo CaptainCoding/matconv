@@ -1,0 +1,19 @@
+mdl 1.7;
+
+import ::df::*;
+import ::state::*;
+import ::tex::*;
+
+export material textured_diffuse() = material(
+    surface: material_surface(
+        scattering: df::diffuse_reflection_bsdf(
+            tint: tex::lookup_color(
+                texture_2d("textures/checker.png", tex::gamma_srgb),
+                float2(
+                    state::texture_coordinate(0).x,
+                    state::texture_coordinate(0).y
+                )
+            )
+        )
+    )
+);
