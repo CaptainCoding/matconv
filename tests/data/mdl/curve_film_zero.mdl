@@ -1,0 +1,23 @@
+mdl 1.7;
+
+import ::df::*;
+
+export material curve_film_zero() = material(
+    surface: material_surface(
+        scattering: df::thin_film(
+            thickness: 0.0,
+            ior: color(1.5),
+            base: df::custom_curve_layer(
+                normal_reflectivity: 0.05325444,
+                grazing_reflectivity: 0.75,
+                layer: df::microfacet_ggx_smith_bsdf(
+                    roughness_u: 0.25,
+                    tint: color(0.8),
+                    multiscatter_tint: color(0.8),
+                    mode: df::scatter_reflect
+                )
+            )
+        )
+    ),
+    ior: color(1.6)
+);

@@ -1,0 +1,22 @@
+mdl 1.7;
+
+import ::df::*;
+import ::state::*;
+import ::tex::*;
+
+export material textured_roughness() = let {
+    float roughness = 0.05 + 0.5 * tex::lookup_float(
+        texture_2d("textures/checker.png", tex::gamma_linear),
+        float2(state::texture_coordinate(0).x, state::texture_coordinate(0).y)
+    );
+} in material(
+    surface: material_surface(
+        scattering: df::microfacet_ggx_smith_bsdf(
+            roughness_u: roughness,
+            roughness_v: roughness,
+            tint: color(0.8),
+            mode: df::scatter_reflect
+        )
+    ),
+    ior: color(1.6)
+);

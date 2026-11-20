@@ -1,0 +1,15 @@
+mdl 1.7;
+
+import ::df::*;
+
+export material ggx_glass_smooth() = material(
+    surface: material_surface(
+        scattering: df::microfacet_ggx_smith_bsdf(
+            roughness_u: 0.0,
+            roughness_v: 0.0,
+            tint: color(1.0),
+            mode: df::scatter_reflect_transmit
+        )
+    ),
+    ior: color(1.6)
+);

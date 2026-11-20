@@ -1,5 +1,6 @@
 #include "conversion.h"
 #include "materialx_utils.h"
+#include "texture_resources.h"
 #include "mdl_runtime.h"
 
 #include <MaterialXCore/Document.h>
@@ -242,6 +243,67 @@ bool is_neutral_expression(const mdl::IExpression *expression) {
   return is_neutral_value(value.get());
 }
 
+bool is_unit_ior_value(const mdl::IValue *value) {
+  if (!value)
+    return false;
+  if (value->get_kind() == mdl::IValue::VK_FLOAT)
+    return static_cast<const mdl::IValue_float *>(value)->get_value() == 1.0f;
+  if (value->get_kind() != mdl::IValue::VK_COLOR)
+    return false;
+  const auto *color = static_cast<const mdl::IValue_compound *>(value);
+  for (mi::Size index = 0; index < color->get_size(); ++index) {
+    mi::base::Handle<const mdl::IValue_float> component(
+        color->get_value<mdl::IValue_float>(index));
+    if (!component || component->get_value() != 1.0f)
+      return false;
+  }
+  return true;
+}
+
+bool is_unit_ior_expression(const mdl::IExpression *expression,
+                            const mdl::ICompiled_material *compiled) {
+  if (!expression)
+    return false;
+  if (expression->get_kind() == mdl::IExpression::EK_TEMPORARY) {
+    const auto *temporary =
+        static_cast<const mdl::IExpression_temporary *>(expression);
+    mi::base::Handle<const mdl::IExpression> value(
+        compiled->get_temporary(temporary->get_index()));
+    return is_unit_ior_expression(value.get(), compiled);
+  }
+  if (expression->get_kind() != mdl::IExpression::EK_CONSTANT)
+    return false;
+  mi::base::Handle<const mdl::IValue> value(
+      static_cast<const mdl::IExpression_constant *>(expression)->get_value());
+  return is_unit_ior_value(value.get());
+}
+
+bool is_state_normal_expression(const mdl::IExpression *expression,
+                                const mdl::ICompiled_material *compiled,
+                                mdl::ITransaction *transaction) {
+  if (!expression)
+    return false;
+  if (expression->get_kind() == mdl::IExpression::EK_TEMPORARY) {
+    const auto *temporary =
+        static_cast<const mdl::IExpression_temporary *>(expression);
+    mi::base::Handle<const mdl::IExpression> value(
+        compiled->get_temporary(temporary->get_index()));
+    return is_state_normal_expression(value.get(), compiled, transaction);
+  }
+  if (expression->get_kind() != mdl::IExpression::EK_DIRECT_CALL)
+    return false;
+  const char *definition_name =
+      static_cast<const mdl::IExpression_direct_call *>(expression)
+          ->get_definition();
+  mi::base::Handle<const mdl::IFunction_definition> definition(
+      definition_name
+          ? transaction->access<mdl::IFunction_definition>(definition_name)
+          : nullptr);
+  return definition &&
+         definition->get_semantic() ==
+             mdl::IFunction_definition::DS_INTRINSIC_STATE_NORMAL;
+}
+
 const char *math_node_category(mdl::IFunction_definition::Semantics semantic) {
   using S = mdl::IFunction_definition;
   switch (semantic) {
@@ -310,11 +372,11 @@ public:
                        mdl::ITransaction *transaction,
                        const mx::NodeGraphPtr &graph,
                        ConversionReport &report, const std::string &material,
-                       std::filesystem::path output_directory,
+                       TextureResourcePackager &texture_packager,
                        std::filesystem::path resource_directory)
       : compiled_(compiled), transaction_(transaction), graph_(graph),
         report_(report), material_(material),
-        output_directory_(std::move(output_directory)),
+        texture_packager_(texture_packager),
         resource_directory_(std::move(resource_directory)) {
     for (mi::Size index = 0; index < compiled_->get_parameter_count(); ++index) {
       const char *parameter_name = compiled_->get_parameter_name(index);
@@ -362,7 +424,467 @@ public:
     }
   }
 
+  MxExpression scalarize_color(const MxExpression &expression,
+                               const std::string &prefix) {
+    if (expression.type != "color3")
+      return expression;
+
+    mx::NodePtr average =
+        graph_->addNode("dotproduct", next_name(prefix), "float");
+    average->setNodeDefString("ND_dotproduct_vector3");
+    add_node_inputs_from_definition(average);
+    mx::InputPtr weights = average->getInput("in2");
+    if (!weights) {
+      report_.warn(material_ + ": could not create a scalar MaterialX " +
+                   prefix + ".");
+      return {};
+    }
+    weights->setValueString("0.333333333, 0.333333333, 0.333333333");
+    if (!connect_expression(expression, average->getInput("in1"), report_,
+                            material_, prefix))
+      return {};
+
+    ++report_.translated_nodes;
+    return {average, {}, "float"};
+  }
+
+  bool approximate_bsdf(const mdl::IExpression *expression,
+                        const mx::NodePtr &surface,
+                        const MxExpression &layer_weight = {},
+                        const MxExpression &tint_override = {}) {
+    if (!expression)
+      return false;
+    if (expression->get_kind() == mdl::IExpression::EK_TEMPORARY) {
+      const auto *temporary =
+          static_cast<const mdl::IExpression_temporary *>(expression);
+      mi::base::Handle<const mdl::IExpression> value(
+          compiled_->get_temporary(temporary->get_index()));
+      return approximate_bsdf(value.get(), surface, layer_weight,
+                              tint_override);
+    }
+    if (expression->get_kind() == mdl::IExpression::EK_CONSTANT) {
+      const auto *constant =
+          static_cast<const mdl::IExpression_constant *>(expression);
+      mi::base::Handle<const mdl::IValue> value(constant->get_value());
+      if (value && value->get_kind() == mdl::IValue::VK_INVALID_DF) {
+        if (!layer_weight.valid()) {
+          set_preview_value(surface, "base", "0.0");
+          set_preview_value(surface, "specular", "0.0");
+          set_preview_value(surface, "transmission", "0.0");
+        }
+        return true;
+      }
+    }
+    if (expression->get_kind() != mdl::IExpression::EK_DIRECT_CALL) {
+      set_diffuse_fallback(surface, "non-call BSDF expression");
+      return true;
+    }
+
+    const auto *call =
+        static_cast<const mdl::IExpression_direct_call *>(expression);
+    const char *definition_name = call->get_definition();
+    mi::base::Handle<const mdl::IFunction_definition> definition(
+        definition_name
+            ? transaction_->access<mdl::IFunction_definition>(definition_name)
+            : nullptr);
+    if (!definition) {
+      set_diffuse_fallback(surface, "unresolved BSDF call");
+      return true;
+    }
+
+    using S = mdl::IFunction_definition;
+    const auto semantic = definition->get_semantic();
+    if (semantic == S::DS_INTRINSIC_DF_DIFFUSE_REFLECTION_BSDF)
+      return approximate_diffuse(call, surface, layer_weight, tint_override);
+    if (semantic == S::DS_INTRINSIC_DF_MICROFACET_GGX_SMITH_BSDF)
+      return approximate_microfacet(call, surface, layer_weight,
+                                    tint_override);
+    if (semantic == S::DS_INTRINSIC_DF_FRESNEL_FACTOR)
+      return approximate_conductor(call, surface, tint_override);
+    if (semantic == S::DS_INTRINSIC_DF_THIN_FILM)
+      return approximate_thin_film(call, surface, tint_override);
+    if (semantic == S::DS_INTRINSIC_DF_WEIGHTED_LAYER ||
+        semantic == S::DS_INTRINSIC_DF_CUSTOM_CURVE_LAYER ||
+        semantic == S::DS_INTRINSIC_DF_COLOR_CUSTOM_CURVE_LAYER)
+      return approximate_layer(call, surface, tint_override, semantic);
+    if (semantic == S::DS_INTRINSIC_DF_TINT) {
+      mi::base::Handle<const mdl::IExpression> bsdf = argument(call, "bsdf");
+      mi::base::Handle<const mdl::IExpression> tint = argument(call, "tint");
+      MxExpression translated_tint = translate(tint.get());
+      if (tint_override.valid())
+        translated_tint =
+            multiply_colors(translated_tint, tint_override, "tint");
+      return approximate_bsdf(bsdf.get(), surface, layer_weight,
+                              translated_tint);
+    }
+
+    MxExpression tint = translate(argument(call, "tint").get());
+    if (tint_override.valid())
+      tint = multiply_colors(tint, tint_override, "fallback_tint");
+    set_diffuse_fallback(surface, "unsupported BSDF");
+    if (tint.valid())
+      connect_preview_input(tint, surface, "base_color", "fallback tint");
+    const char *mdl_name = definition->get_mdl_name();
+    report_.warn(material_ + ": MDL BSDF " +
+                 (mdl_name ? mdl_name : definition_name) +
+                 " was approximated as diffuse because no standard_surface "
+                 "mapping exists.");
+    return true;
+  }
+
 private:
+  mi::base::Handle<const mdl::IExpression>
+  argument(const mdl::IExpression_direct_call *call,
+           const std::string &name) const {
+    mi::base::Handle<const mdl::IExpression_list> arguments(
+        call->get_arguments());
+    if (!arguments)
+      return {};
+    for (mi::Size index = 0; index < arguments->get_size(); ++index) {
+      const char *argument_name = arguments->get_name(index);
+      if (argument_name && name == argument_name)
+        return mi::base::Handle<const mdl::IExpression>(
+            arguments->get_expression(index));
+    }
+    return {};
+  }
+
+  bool connect_preview_input(const MxExpression &expression,
+                             const mx::NodePtr &surface,
+                             const std::string &input_name,
+                             const std::string &slot) {
+    mx::InputPtr input = surface->getInput(input_name);
+    if (!input) {
+      report_.warn(material_ +
+                   ": standard_surface has no " + input_name +
+                   " input for " + slot + ".");
+      return false;
+    }
+    return connect_expression(expression, input, report_, material_, slot);
+  }
+
+  void set_preview_value(const mx::NodePtr &surface,
+                         const std::string &input_name,
+                         const std::string &value) {
+    if (mx::InputPtr input = surface->getInput(input_name))
+      input->setValueString(value);
+  }
+
+  void set_diffuse_fallback(const mx::NodePtr &surface,
+                            const std::string &reason) {
+    set_preview_value(surface, "base", "1.0");
+    set_preview_value(surface, "base_color", "0.18, 0.18, 0.18");
+    set_preview_value(surface, "specular", "0.0");
+    set_preview_value(surface, "transmission", "0.0");
+    report_.warn(material_ + ": " + reason +
+                 " was approximated with neutral gray diffuse.");
+  }
+
+  MxExpression make_constant_expression(const std::string &type,
+                                        const std::string &value,
+                                        const std::string &prefix) {
+    mx::NodePtr node =
+        graph_->addNode("constant", next_name(prefix), type);
+    add_node_inputs_from_definition(node);
+    mx::InputPtr input = node->getInput("value");
+    if (!input)
+      return {};
+    input->setValueString(value);
+    ++report_.translated_nodes;
+    return {node, {}, type};
+  }
+
+  MxExpression make_binary_expression(const std::string &category,
+                                      const std::string &type,
+                                      const MxExpression &left,
+                                      const MxExpression &right,
+                                      const std::string &prefix) {
+    mx::NodePtr node = graph_->addNode(category, next_name(prefix), type);
+    add_node_inputs_from_definition(node);
+    if (!connect_expression(left, node->getInput("in1"), report_, material_,
+                            prefix) ||
+        !connect_expression(right, node->getInput("in2"), report_, material_,
+                            prefix))
+      return {};
+    ++report_.translated_nodes;
+    return {node, {}, type};
+  }
+
+  MxExpression multiply_colors(const MxExpression &left,
+                               const MxExpression &right,
+                               const std::string &prefix) {
+    if (!left.valid())
+      return right;
+    if (!right.valid())
+      return left;
+    return make_binary_expression("multiply", "color3", left, right, prefix);
+  }
+
+  MxExpression standard_surface_roughness(const MxExpression &roughness) {
+    if (!roughness.valid())
+      return {};
+    MxExpression zero = make_constant_expression("float", "0.0", "roughness_zero");
+    MxExpression nonnegative = make_binary_expression(
+        "max", "float", roughness, zero, "roughness_nonnegative");
+    if (!nonnegative.valid())
+      return {};
+    mx::NodePtr node = graph_->addNode("sqrt", next_name("roughness_sqrt"), "float");
+    add_node_inputs_from_definition(node);
+    if (!connect_expression(nonnegative, node->getInput("in"), report_,
+                            material_, "microfacet roughness"))
+      return {};
+    ++report_.translated_nodes;
+    return {node, {}, "float"};
+  }
+
+  MxExpression translate_roughness(const mdl::IExpression *expression) {
+    if (!expression)
+      return {};
+    if (expression->get_kind() == mdl::IExpression::EK_TEMPORARY) {
+      const auto *temporary =
+          static_cast<const mdl::IExpression_temporary *>(expression);
+      mi::base::Handle<const mdl::IExpression> value(
+          compiled_->get_temporary(temporary->get_index()));
+      return translate_roughness(value.get());
+    }
+    if (expression->get_kind() != mdl::IExpression::EK_DIRECT_CALL)
+      return {};
+
+    const auto *call =
+        static_cast<const mdl::IExpression_direct_call *>(expression);
+    mi::base::Handle<const mdl::IExpression> roughness =
+        argument(call, "roughness_u");
+    if (roughness)
+      return translate(roughness.get());
+    for (const char *name : {"base", "layer"}) {
+      mi::base::Handle<const mdl::IExpression> nested = argument(call, name);
+      MxExpression result = translate_roughness(nested.get());
+      if (result.valid())
+        return result;
+    }
+    return {};
+  }
+
+  bool approximate_diffuse(const mdl::IExpression_direct_call *call,
+                           const mx::NodePtr &surface,
+                           const MxExpression &layer_weight,
+                           const MxExpression &tint_override) {
+    if (layer_weight.valid())
+      connect_preview_input(layer_weight, surface, "base", "diffuse weight");
+    else {
+      set_preview_value(surface, "base", "1.0");
+      set_preview_value(surface, "specular", "0.0");
+      set_preview_value(surface, "transmission", "0.0");
+    }
+
+    MxExpression tint = translate(argument(call, "tint").get());
+    tint = multiply_colors(tint, tint_override, "diffuse_tint");
+    if (tint.valid())
+      connect_preview_input(tint, surface, "base_color", "diffuse tint");
+
+    MxExpression roughness =
+        translate(argument(call, "roughness").get());
+    if (roughness.valid())
+      connect_preview_input(roughness, surface, "diffuse_roughness",
+                            "diffuse roughness");
+    report_.warn(material_ +
+                 ": MDL diffuse was approximated with standard_surface base; "
+                 "MDL multiscatter tint is not represented.");
+    return true;
+  }
+
+  bool approximate_microfacet(const mdl::IExpression_direct_call *call,
+                              const mx::NodePtr &surface,
+                              const MxExpression &layer_weight,
+                              const MxExpression &tint_override) {
+    mi::base::Handle<const mdl::IExpression> mode =
+        argument(call, "mode");
+    const std::string mode_name = enum_name(mode.get());
+    const bool transmit = mode_name == "scatter_transmit";
+    const bool reflect_transmit = mode_name == "scatter_reflect_transmit";
+    const bool standalone_reflection =
+        mode_name == "scatter_reflect" && !layer_weight.valid();
+    const std::string weight = transmit ? "transmission" : "specular";
+    if (!layer_weight.valid()) {
+      set_preview_value(surface, "base", standalone_reflection ? "1.0" : "0.0");
+      if (standalone_reflection)
+        set_preview_value(surface, "metalness", "1.0");
+      set_preview_value(surface, "specular", transmit ? "0.0" : "1.0");
+      set_preview_value(surface, "transmission",
+                        transmit || reflect_transmit ? "1.0" : "0.0");
+    }
+
+    if (layer_weight.valid()) {
+      connect_preview_input(layer_weight, surface, weight,
+                            "microfacet layer weight");
+      if (reflect_transmit)
+        connect_preview_input(layer_weight, surface, "transmission",
+                              "microfacet transmission layer weight");
+    }
+
+    MxExpression tint = translate(argument(call, "tint").get());
+    tint = multiply_colors(tint, tint_override, "microfacet_tint");
+    if (tint.valid()) {
+      connect_preview_input(tint, surface,
+                           standalone_reflection ? "base_color"
+                           : transmit ? "transmission_color" : "specular_color",
+                           "microfacet tint");
+      if (reflect_transmit)
+        connect_preview_input(tint, surface, "transmission_color",
+                              "microfacet transmission tint");
+    }
+
+    MxExpression roughness = standard_surface_roughness(
+        translate(argument(call, "roughness_u").get()));
+    if (roughness.valid()) {
+      if (transmit && layer_weight.valid()) {
+        connect_preview_input(roughness, surface, "transmission_extra_roughness",
+                              "microfacet transmission roughness");
+        report_.warn(material_ +
+                     ": layered transmission roughness is added to the "
+                     "standard_surface specular roughness.");
+      } else {
+        connect_preview_input(roughness, surface, "specular_roughness",
+                              "microfacet roughness");
+        if (!layer_weight.valid() && (transmit || reflect_transmit))
+          set_preview_value(surface, "transmission_extra_roughness", "0.0");
+      }
+    }
+    report_.warn(material_ +
+                 ": MDL GGX was approximated with standard_surface; "
+                 "anisotropy, backscatter, and multiscatter tint may differ.");
+    if (standalone_reflection)
+      report_.warn(material_ +
+                   ": reflection-only GGX was approximated as metallic; "
+                   "its grazing-angle reflectance may differ.");
+    return true;
+  }
+
+  bool approximate_conductor(const mdl::IExpression_direct_call *call,
+                             const mx::NodePtr &surface,
+                             const MxExpression &tint_override) {
+    mi::base::Handle<const mdl::IExpression> ior_expression =
+        argument(call, "ior");
+    mi::base::Handle<const mdl::IExpression> extinction_expression =
+        argument(call, "extinction_coefficient");
+    mi::base::Handle<const mdl::IExpression> base_expression =
+        argument(call, "base");
+    MxExpression ior = translate(ior_expression.get());
+    MxExpression extinction = translate(extinction_expression.get());
+    MxExpression reflectance;
+    if (ior.valid() && extinction.valid() && ior.type == "color3" &&
+        extinction.type == "color3") {
+      MxExpression one =
+          make_constant_expression("color3", "1.0, 1.0, 1.0", "conductor_one");
+      MxExpression ior_minus_one =
+          make_binary_expression("subtract", "color3", ior, one,
+                                 "conductor_ior_minus_one");
+      MxExpression ior_plus_one =
+          make_binary_expression("add", "color3", ior, one,
+                                 "conductor_ior_plus_one");
+      MxExpression numerator = make_binary_expression(
+          "add", "color3",
+          make_binary_expression("multiply", "color3", ior_minus_one,
+                                 ior_minus_one, "conductor_ior_square"),
+          make_binary_expression("multiply", "color3", extinction,
+                                 extinction, "conductor_extinction_square"),
+          "conductor_reflectance_numerator");
+      MxExpression denominator = make_binary_expression(
+          "add", "color3",
+          make_binary_expression("multiply", "color3", ior_plus_one,
+                                 ior_plus_one, "conductor_ior_denominator"),
+          make_binary_expression("multiply", "color3", extinction,
+                                 extinction, "conductor_extinction_denominator"),
+          "conductor_reflectance_denominator");
+      reflectance = make_binary_expression(
+          "divide", "color3", numerator, denominator,
+          "conductor_reflectance");
+    }
+    reflectance = multiply_colors(reflectance, tint_override,
+                                  "conductor_tint");
+    set_preview_value(surface, "base", "1.0");
+    set_preview_value(surface, "metalness", "1.0");
+    set_preview_value(surface, "specular", "0.0");
+    if (reflectance.valid())
+      connect_preview_input(reflectance, surface, "base_color",
+                            "conductor reflectance");
+    else {
+      set_preview_value(surface, "base_color", "0.8, 0.8, 0.8");
+      report_.warn(material_ +
+                   ": conductor Fresnel values were not translatable; using "
+                   "a gray metallic approximation.");
+    }
+    MxExpression roughness =
+        standard_surface_roughness(translate_roughness(base_expression.get()));
+    if (roughness.valid())
+      connect_preview_input(roughness, surface, "specular_roughness",
+                            "conductor roughness");
+    report_.warn(material_ +
+                 ": MDL conductor was approximated with standard_surface "
+                 "metalness using normal-incidence reflectance.");
+    return true;
+  }
+
+  bool approximate_thin_film(const mdl::IExpression_direct_call *call,
+                             const mx::NodePtr &surface,
+                             const MxExpression &tint_override) {
+    mi::base::Handle<const mdl::IExpression> base =
+        argument(call, "base");
+    mi::base::Handle<const mdl::IExpression> thickness =
+        argument(call, "thickness");
+    mi::base::Handle<const mdl::IExpression> ior_expression =
+        argument(call, "ior");
+    const bool base_mapped =
+        approximate_bsdf(base.get(), surface, {}, tint_override);
+    MxExpression translated_thickness = translate(thickness.get());
+    if (translated_thickness.valid())
+      connect_preview_input(translated_thickness, surface,
+                            "thin_film_thickness", "thin-film thickness");
+    MxExpression ior = translate(ior_expression.get());
+    if (ior.type == "color3")
+      ior = scalarize_color(ior, "thinfilm_ior");
+    if (ior.valid())
+      connect_preview_input(ior, surface, "thin_film_IOR", "thin-film IOR");
+    report_.warn(material_ +
+                 ": MDL thin film was approximated with standard_surface "
+                 "thin-film controls.");
+    return base_mapped;
+  }
+
+  bool approximate_layer(const mdl::IExpression_direct_call *call,
+                         const mx::NodePtr &surface,
+                         const MxExpression &tint_override,
+                         mdl::IFunction_definition::Semantics semantic) {
+    mi::base::Handle<const mdl::IExpression> base =
+        argument(call, "base");
+    mi::base::Handle<const mdl::IExpression> layer =
+        argument(call, "layer");
+    mi::base::Handle<const mdl::IExpression> weight_expression =
+        argument(call, "weight");
+    MxExpression weight = translate(weight_expression.get());
+    if (!weight.valid()) {
+      weight = make_constant_expression("float", "0.5", "layer_weight");
+      report_.warn(material_ +
+                   ": layer weight could not be translated; using 0.5.");
+    }
+
+    const bool base_mapped =
+        approximate_bsdf(base.get(), surface, {}, tint_override);
+    const bool layer_mapped =
+        approximate_bsdf(layer.get(), surface, weight, tint_override);
+    if (semantic ==
+        mdl::IFunction_definition::DS_INTRINSIC_DF_WEIGHTED_LAYER) {
+      report_.warn(material_ +
+                   ": MDL weighted_layer was approximated with standard_surface "
+                   "base and specular/transmission weights.");
+    } else {
+      report_.warn(material_ +
+                   ": MDL custom-curve layer was approximated with standard_surface; "
+                   "its Fresnel curve is not reproduced.");
+    }
+    return base_mapped || layer_mapped;
+  }
+
   MxExpression make_constant(const mdl::IValue *value,
                              const std::string &prefix) {
     std::string type;
@@ -491,26 +1013,8 @@ private:
       return;
 
     ThinFilmParameters &film = thin_films_.front();
-    if (film.ior.type == "color3" && !film.scalar_ior.valid()) {
-      mx::NodePtr average =
-          graph_->addNode("dotproduct", next_name("thinfilm_ior"), "float");
-      average->setNodeDefString("ND_dotproduct_vector3");
-      add_node_inputs_from_definition(average);
-      mx::InputPtr weights = average->getInput("in2");
-      if (!weights) {
-        report_.warn(material_ +
-                     ": could not create a scalar MaterialX thin-film IOR.");
-        return;
-      }
-      weights->setValueString(
-          "0.333333333, 0.333333333, 0.333333333");
-      if (!connect_expression(film.ior, average->getInput("in1"), report_,
-                              material_, "thin-film IOR")) {
-        return;
-      }
-      film.scalar_ior = {average, {}, "float"};
-      ++report_.translated_nodes;
-    }
+    if (film.ior.type == "color3" && !film.scalar_ior.valid())
+      film.scalar_ior = scalarize_color(film.ior, "thinfilm_ior");
 
     const MxExpression &ior =
         film.ior.type == "color3" ? film.scalar_ior : film.ior;
@@ -707,7 +1211,7 @@ private:
                    "reflection mode.");
     report_.warn(material_ +
                  ": MDL GGX microfacet was approximated with a MaterialX "
-                 "dielectric BSDF; its IOR and backscatter may differ.");
+                 "dielectric BSDF; its backscatter may differ.");
     ++report_.translated_nodes;
     return {bsdf, {}, "BSDF"};
   }
@@ -959,12 +1463,8 @@ private:
       return {};
     }
 
-    std::error_code path_error;
-    const std::filesystem::path relative_path =
-        std::filesystem::relative(texture_path, output_directory_, path_error);
     const std::string materialx_path =
-        path_error ? texture_path.generic_string()
-                   : relative_path.generic_string();
+        texture_packager_.package(texture_path);
 
     mi::base::Handle<const mdl::IType> expression_type(
         expression->get_type());
@@ -1559,7 +2059,7 @@ private:
   mx::NodeGraphPtr graph_;
   ConversionReport &report_;
   std::string material_;
-  std::filesystem::path output_directory_;
+  TextureResourcePackager &texture_packager_;
   std::filesystem::path resource_directory_;
   mi::Size node_index_ = 0;
   std::map<mi::Size, std::string> parameter_names_;
@@ -1568,14 +2068,27 @@ private:
   std::size_t next_thin_film_scope_id_ = 1;
 };
 
-void add_black_bsdf(const mx::NodeGraphPtr &graph,
-                    const mx::NodePtr &surface, const std::string &node_name) {
-  mx::NodePtr black =
-      graph->addNode("oren_nayar_diffuse_bsdf",
-                     unique_element_name(graph, node_name), "BSDF");
-  add_node_inputs_from_definition(black);
-  black->getInput("color")->setValueString("0.0, 0.0, 0.0");
-  surface->getInput("bsdf")->setConnectedNode(black);
+mx::NodePtr create_standard_surface_shader(const mx::NodeGraphPtr &graph,
+                                          const std::string &base_name) {
+  mx::NodePtr surface = graph->addNode(
+      "standard_surface", unique_element_name(graph, base_name),
+      "surfaceshader");
+  surface->addInputsFromNodeDef();
+
+  mx::NodePtr normal =
+      graph->addNode("normal", unique_element_name(graph, "surface_normal"),
+                     "vector3");
+  add_node_inputs_from_definition(normal);
+  normal->getInput("space")->setValueString("world");
+  surface->getInput("normal")->setConnectedNode(normal);
+  surface->getInput("coat_normal")->setConnectedNode(normal);
+  surface->getInput("tangent")->setValueString("1.0, 0.0, 0.0");
+  surface->getInput("base")->setValueString("0.0");
+  surface->getInput("base_color")->setValueString("0.18, 0.18, 0.18");
+  surface->getInput("specular")->setValueString("0.0");
+  surface->getInput("transmission")->setValueString("0.0");
+  surface->getInput("emission")->setValueString("0.0");
+  return surface;
 }
 
 bool connect_expression(const MxExpression &expression,
@@ -1640,51 +2153,39 @@ MxExpression translate_slot(ExpressionTranslator &translator,
   return translator.translate(expression.get());
 }
 
-void connect_emission(const mx::NodeGraphPtr &graph,
-                      ExpressionTranslator &translator,
-                      const mdl::ICompiled_material *compiled,
-                      const mx::NodePtr &surface, ConversionReport &report,
-                      const std::string &material, const std::string &prefix) {
-  mi::base::Handle<const mdl::IExpression> emission_expression(
+void connect_standard_surface_emission(
+    ExpressionTranslator &translator, const mdl::ICompiled_material *compiled,
+    const mx::NodePtr &surface, ConversionReport &report,
+    const std::string &material, const std::string &prefix) {
+  mi::base::Handle<const mdl::IExpression> emission(
       compiled->lookup_sub_expression((prefix + ".emission").c_str()));
-  if (!emission_expression ||
-      is_neutral_expression(emission_expression.get()))
+  if (!emission || is_neutral_expression(emission.get()))
     return;
-
-  MxExpression emission = translator.translate(emission_expression.get());
-  if (!emission.valid() || emission.type != "EDF") {
-    report.warn(material + ": " + prefix +
-                ".emission could not be represented as an EDF.");
-    return;
-  }
 
   MxExpression intensity = translate_slot(
       translator, compiled, (prefix + ".intensity").c_str());
-  if (intensity.valid()) {
-    mx::NodePtr multiply = graph->addNode(
-        "multiply",
-        unique_element_name(graph, safe_material_name(prefix) + "_intensity"),
-        "EDF");
-    multiply->addInput("in1", "EDF");
-    multiply->addInput("in2", intensity.type);
-    add_node_inputs_from_definition(multiply);
-    connect_expression(emission, multiply->getInput("in1"), report, material,
-                       prefix + ".emission");
-    connect_expression(intensity, multiply->getInput("in2"), report, material,
-                       prefix + ".intensity");
-    surface->getInput("edf")->setConnectedNode(multiply);
+  if (intensity.type == "color3") {
+    surface->getInput("emission")->setValueString("1.0");
+    connect_expression(intensity, surface->getInput("emission_color"), report,
+                       material, prefix + ".intensity");
+  } else if (intensity.type == "float") {
+    connect_expression(intensity, surface->getInput("emission"), report,
+                       material, prefix + ".intensity");
   } else {
-    surface->getInput("edf")->setConnectedNode(emission.node);
-    if (!emission.node)
-      surface->getInput("edf")
-          ->setConnectedInterfaceName(emission.interface_name);
+    report.warn(material +
+                ": emission was approximated with unit white because its "
+                "intensity is not a scalar or color.");
+    surface->getInput("emission")->setValueString("1.0");
   }
 
   mi::base::Handle<const mdl::IExpression> mode(
       compiled->lookup_sub_expression((prefix + ".mode").c_str()));
   if (mode && !is_neutral_expression(mode.get()))
-    report.warn(material + ": " + prefix +
-                ".mode is not represented by the MaterialX emission graph.");
+    report.warn(material +
+                ": emission mode is not represented by standard_surface.");
+  report.warn(material +
+              ": MDL emission was approximated with standard_surface "
+              "emission controls.");
 }
 
 void add_backface(const mx::NodeGraphPtr &graph,
@@ -1701,25 +2202,17 @@ void add_backface(const mx::NodeGraphPtr &graph,
     return;
 
   mx::NodePtr shader =
-      graph->addNode(
-          "surface",
-          unique_element_name(graph, "backface_surface_shader"),
-          "surfaceshader");
-  add_node_inputs_from_definition(shader);
+      create_standard_surface_shader(graph, "backface_surface_shader");
   if (!is_neutral_expression(scattering.get())) {
-    MxExpression value = translator.translate(scattering.get());
-    if (!value.valid() || value.type != "BSDF") {
+    if (!translator.approximate_bsdf(scattering.get(), shader)) {
+      shader->getInput("base")->setValueString("1.0");
       report.warn(name +
-                  ": backface.scattering is unsupported; using an explicit "
-                  "black diffuse fallback.");
-      add_black_bsdf(graph, shader, "unsupported_backface_bsdf");
-    } else {
-      connect_expression(value, shader->getInput("bsdf"), report, name,
-                         "backface.scattering");
+                  ": backface.scattering could not be translated; using "
+                  "neutral gray diffuse.");
     }
   }
-  connect_emission(graph, translator, compiled, shader, report, name,
-                   "backface.emission");
+  connect_standard_surface_emission(translator, compiled, shader, report,
+                                    name, "backface.emission");
 
   const std::string output_name =
       unique_element_name(graph, "backface_output");
@@ -1783,22 +2276,39 @@ void report_unsupported_slot(const mdl::ICompiled_material *compiled,
                 " is not yet translated to MaterialX.");
 }
 
-void report_unsupported_ior(const mdl::ICompiled_material *compiled,
-                           ConversionReport &report,
-                           const std::string &material) {
+void apply_material_ior(const mdl::ICompiled_material *compiled,
+                        ExpressionTranslator &translator,
+                        const mx::NodePtr &surface,
+                        ConversionReport &report,
+                        const std::string &material) {
   mi::base::Handle<const mdl::IExpression> expression(
       compiled->lookup_sub_expression("ior"));
-  if (expression && !is_neutral_expression(expression.get()))
+  if (!expression || is_neutral_expression(expression.get()) ||
+      is_unit_ior_expression(expression.get(), compiled))
+    return;
+
+  MxExpression ior = translator.translate(expression.get());
+  if (ior.type == "color3")
+    ior = translator.scalarize_color(ior, "material_ior");
+  if (!ior.valid() || ior.type != "float") {
     report.warn(material +
-                ": the material IOR slot is not yet translated to "
-                "MaterialX.");
+                ": material IOR could not be represented by a scalar "
+                "MaterialX specular IOR.");
+    return;
+  }
+
+  mx::InputPtr input = surface->getInput("specular_IOR");
+  if (!input ||
+      !connect_expression(ior, input, report, material, "material IOR"))
+    report.warn(material +
+                ": material IOR could not be applied to standard_surface.");
 }
 
 void add_material(mx::DocumentPtr document,
                   const mdl::IFunction_definition *definition,
                   mdl::ITransaction *transaction,
                   mdl::IMdl_factory *mdl_factory, const std::string &name,
-                  const std::filesystem::path &output_directory,
+                  TextureResourcePackager &texture_packager,
                   const std::filesystem::path &resource_directory,
                   ConversionReport &report) {
   mi::Sint32 creation_error = 0;
@@ -1833,24 +2343,17 @@ void add_material(mx::DocumentPtr document,
       unique_element_name(document, safe_name + "_graph");
   mx::NodeGraphPtr graph = document->addNodeGraph(graph_name);
   mx::NodePtr surface =
-      graph->addNode("surface", unique_element_name(graph, "surface_shader"),
-                     "surfaceshader");
-  add_node_inputs_from_definition(surface);
+      create_standard_surface_shader(graph, "surface_shader");
 
   ExpressionTranslator translator(compiled.get(), transaction, graph, report,
-                                  name, output_directory, resource_directory);
+                                  name, texture_packager, resource_directory);
   mi::base::Handle<const mdl::IExpression> scattering(
       compiled->lookup_sub_expression("surface.scattering"));
-  MxExpression scattering_value = translator.translate(scattering.get());
-  const bool scattering_connected =
-      scattering_value.valid() && scattering_value.type == "BSDF" &&
-      connect_expression(scattering_value, surface->getInput("bsdf"), report,
-                         name, "surface.scattering");
-  if (!scattering_connected) {
+  if (!translator.approximate_bsdf(scattering.get(), surface)) {
+    surface->getInput("base")->setValueString("1.0");
     report.warn(name +
-                ": surface.scattering could not be translated; using an "
-                "explicit black diffuse fallback.");
-    add_black_bsdf(graph, surface, "unsupported_surface_bsdf");
+                ": surface.scattering could not be translated; using neutral "
+                "gray diffuse.");
   }
 
   mi::base::Handle<const mdl::IExpression> opacity_expression(
@@ -1869,8 +2372,8 @@ void add_material(mx::DocumentPtr document,
     connect_expression(thin_walled, surface->getInput("thin_walled"), report,
                        name, "thin_walled");
   }
-  connect_emission(graph, translator, compiled.get(), surface, report, name,
-                   "surface.emission");
+  connect_standard_surface_emission(translator, compiled.get(), surface,
+                                    report, name, "surface.emission");
 
   const std::string output_name =
       unique_element_name(graph, "surface_output");
@@ -1888,23 +2391,19 @@ void add_material(mx::DocumentPtr document,
   add_displacement(graph, translator, compiled.get(), material, report, name);
   mi::base::Handle<const mdl::IExpression> normal_expression(
       compiled->lookup_sub_expression("geometry.normal"));
-  if (!is_neutral_expression(normal_expression.get())) {
+  if (!is_neutral_expression(normal_expression.get()) &&
+      !is_state_normal_expression(normal_expression.get(), compiled.get(),
+                                  transaction)) {
     MxExpression normal = translator.translate(normal_expression.get());
     if (normal.valid() && normal.type == "vector3") {
-      for (const mx::NodePtr &node : graph->getNodes()) {
-        mx::InputPtr normal_input =
-            node->getType() == "BSDF" ? node->getInput("normal")
-                                      : mx::InputPtr();
-        if (normal_input)
-          connect_expression(normal, normal_input, report, name,
-                             "geometry.normal");
-      }
+      connect_expression(normal, surface->getInput("normal"), report, name,
+                         "geometry.normal");
     } else {
       report.warn(name +
                   ": geometry.normal could not be represented as a vector3.");
     }
   }
-  report_unsupported_ior(compiled.get(), report, name);
+  apply_material_ior(compiled.get(), translator, surface, report, name);
   report_unsupported_slot(compiled.get(), "volume.scattering", report, name);
   report_unsupported_slot(compiled.get(), "volume.absorption_coefficient",
                           report, name);
@@ -1962,6 +2461,8 @@ int mdl_to_materialx(const Options &options) {
   const mx::FileSearchPath search_path = materialx_search_path();
   load_materialx_libraries(document, search_path);
   ConversionReport report;
+  TextureResourcePackager texture_packager(
+      std::filesystem::absolute(options.output).parent_path());
   std::size_t emitted_materials = 0;
   {
     const std::filesystem::path input =
@@ -2011,8 +2512,7 @@ int mdl_to_materialx(const Options &options) {
         continue;
 
       add_material(document, definition.get(), transaction.get(),
-                   mdl_factory.get(), name,
-                   std::filesystem::absolute(options.output).parent_path(),
+                   mdl_factory.get(), name, texture_packager,
                    std::filesystem::absolute(options.input).parent_path(),
                    report);
       ++emitted_materials;

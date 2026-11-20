@@ -18,13 +18,17 @@ their MDL defaults. The initial expression mapping includes common arithmetic
 and math operations, diffuse reflection, and diffuse emission, plus material
 opacity, thin-walled state, backface, and displacement slots.
 
+MDL surface BSDFs are approximated with a renderable `standard_surface`.
+GGX roughness is converted to the standard-surface convention; independent
+roughness in layered reflection and transmission cannot always be preserved.
+Standalone reflection-only GGX uses a metallic approximation because its MDL
+reflection mode does not apply dielectric Fresnel attenuation. The resulting
+grazing-angle reflectance can differ.
 Not every MDL operation has a standard MaterialX equivalent. In particular,
-diffuse reflection is approximated with `oren_nayar_diffuse_bsdf` (MDL's
-`multiscatter_tint` and BSDF handle are not represented), and diffuse emission
-is mapped to `uniform_edf` without guaranteeing equivalent normalization.
-Unsupported expressions and material slots are reported as warnings; an
-unsupported top-level surface BSDF is explicitly replaced with black diffuse
-scattering. Texture conversion requires the MDL OpenImageIO plugin; other
+multiscatter tint and BSDF handles are not fully represented, and emission
+normalization may differ. Unsupported expressions and material slots are
+reported as warnings; an unsupported top-level surface BSDF is approximated
+with neutral gray diffuse. Texture conversion requires the MDL OpenImageIO plugin; other
 unsupported features include measured distributions, hair, and volume
 conversion. Generated documents are validated before they are written.
 
@@ -82,7 +86,10 @@ matconv mtlx-to-mdl \
 `--mdl-path` may be repeated. The input MDL file's own directory and the
 MaterialX MDL support modules fetched by CMake are also added to the MDL search
 path. Other MDL module dependencies and resource paths must be available to the
-SDK through these paths.
+SDK through these paths. Referenced local image files are copied to a
+`textures` directory beside the output file, and resource paths are rebased
+accordingly. Different files with the same name receive a suffix rather than
+overwriting one another.
 
 MDL and vMaterials licenses may restrict conversion, redistribution, or use of
 converted assets. Check the applicable licenses before processing or sharing

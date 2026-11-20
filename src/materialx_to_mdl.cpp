@@ -1,5 +1,6 @@
 #include "conversion.h"
 #include "materialx_utils.h"
+#include "texture_resources.h"
 
 #include <MaterialXCore/Document.h>
 #include <MaterialXFormat/XmlIo.h>
@@ -11,8 +12,10 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <set>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace matconv::detail {
@@ -47,6 +50,55 @@ void write_shader(const mx::ShaderPtr &shader,
   }
 }
 
+void package_renderable_textures(
+    const mx::DocumentPtr &document, const mx::TypedElementPtr &renderable,
+    const std::filesystem::path &input_path,
+    const mx::FileSearchPath &search_path,
+    TextureResourcePackager &texture_packager) {
+  mx::FileSearchPath resource_search_path;
+  resource_search_path.append(
+      mx::FilePath(std::filesystem::absolute(input_path).parent_path().string()));
+  resource_search_path.append(search_path);
+
+  std::vector<mx::ElementPtr> pending;
+  pending.push_back(renderable);
+  std::set<const mx::Element *> visited;
+  while (!pending.empty()) {
+    mx::ElementPtr root = std::move(pending.back());
+    pending.pop_back();
+    if (!visited.insert(root.get()).second)
+      continue;
+
+    for (mx::ElementPtr element : root->traverseTree()) {
+      mx::InputPtr input = element->asA<mx::Input>();
+      if (!input)
+        continue;
+
+      if (input->getType() == "filename" && input->hasValueString() &&
+          !input->getValueString().empty()) {
+        const std::string filename = input->getValueString();
+        const mx::FilePath resolved =
+            resource_search_path.find(mx::FilePath(filename));
+        if (!resolved.exists()) {
+          throw std::runtime_error(
+              "Could not resolve MaterialX texture resource '" + filename +
+              "' referenced by " + input->getNamePath() + ".");
+        }
+        input->setValueString(
+            "./" + texture_packager.package(
+                       std::filesystem::path(resolved.asString())));
+      }
+
+      if (input->hasNodeGraphString()) {
+        mx::NodeGraphPtr graph =
+            document->getNodeGraph(input->getNodeGraphString());
+        if (graph)
+          pending.push_back(graph);
+      }
+    }
+  }
+}
+
 } // namespace
 
 int materialx_to_mdl(const Options &options) {
@@ -74,6 +126,11 @@ int materialx_to_mdl(const Options &options) {
   if (!selected)
     throw std::runtime_error("No MaterialX renderable matches: " +
                              options.material);
+
+  TextureResourcePackager texture_packager(
+      std::filesystem::absolute(options.output).parent_path());
+  package_renderable_textures(document, selected, options.input, search_path,
+                              texture_packager);
 
   const std::string shader_name = safe_material_name(selected->getName());
   const mx::ShaderPtr shader =

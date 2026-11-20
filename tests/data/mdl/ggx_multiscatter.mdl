@@ -1,0 +1,15 @@
+mdl 1.7;
+
+import ::df::*;
+
+export material ggx_multiscatter() = material(
+    surface: material_surface(
+        scattering: df::microfacet_ggx_smith_bsdf(
+            roughness_u: 0.25,
+            tint: color(0.8),
+            multiscatter_tint: color(0.8),
+            mode: df::scatter_reflect
+        )
+    ),
+    ior: color(1.6)
+);
