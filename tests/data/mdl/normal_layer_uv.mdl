@@ -1,0 +1,31 @@
+mdl 1.7;
+
+import ::base::*;
+import ::df::*;
+import ::tex::*;
+
+export material normal_layer_uv(
+    uniform float strength = 0.6,
+    uniform float x_scale = 2.0
+) = let {
+    float4x4 transform = float4x4(
+        0.0, x_scale, 0.0, 0.0,
+        -3.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.2, 0.1, 0.0, 1.0
+    );
+    float3 normal = base::tangent_space_normal_texture(
+        texture_2d("textures/checker.png", tex::gamma_linear),
+        factor: strength,
+        uvw: base::transform_coordinate(transform, base::coordinate_source())
+    );
+} in material(
+    surface: material_surface(
+        scattering: df::weighted_layer(
+            weight: 0.7,
+            layer: df::microfacet_ggx_smith_bsdf(roughness_u: 0.1, roughness_v: 0.1),
+            base: df::diffuse_reflection_bsdf(tint: color(0.3)),
+            normal: normal
+        )
+    )
+);

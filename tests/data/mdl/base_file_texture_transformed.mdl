@@ -1,0 +1,19 @@
+mdl 1.7;
+
+import ::base::*;
+import ::df::*;
+import ::tex::*;
+
+export material base_file_texture_transformed() = material(
+    surface: material_surface(
+        scattering: df::diffuse_reflection_bsdf(
+            tint: base::file_texture(
+                texture: texture_2d("textures/checker.png", tex::gamma_srgb),
+                mono_source: base::mono_average,
+                uvw: base::transform_coordinate(
+                    float4x4(1.0), base::coordinate_source()
+                )
+            ).tint
+        )
+    )
+);

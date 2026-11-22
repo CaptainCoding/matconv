@@ -5,6 +5,7 @@
 #include <MaterialXCore/Document.h>
 #include <MaterialXFormat/XmlIo.h>
 #include <MaterialXGenMdl/MdlShaderGenerator.h>
+#include <MaterialXGenShader/DefaultColorManagementSystem.h>
 #include <MaterialXGenShader/GenContext.h>
 #include <MaterialXGenShader/Shader.h>
 #include <MaterialXGenShader/Util.h>
@@ -22,6 +23,24 @@ namespace matconv::detail {
 namespace {
 
 namespace mx = MaterialX;
+
+void connect_standard_surface_thin_walled(const mx::DocumentPtr &document) {
+  mx::NodeGraphPtr graph =
+      document->getNodeGraph("NG_standard_surface_surfaceshader_100");
+  mx::NodePtr surface = graph ? graph->getNode("shader_constructor") : nullptr;
+  if (!surface || surface->getCategory() != "surface" ||
+      surface->getInput("thin_walled"))
+    return;
+  mx::NodeDefPtr definition =
+      document->getNodeDef("ND_standard_surface_surfaceshader_100");
+  mx::InputPtr thin_walled =
+      definition ? definition->getInput("thin_walled") : nullptr;
+  if (!thin_walled)
+    throw std::runtime_error(
+        "MaterialX standard_surface has no thin_walled definition.");
+  thin_walled->setIsUniform(true);
+  surface->addInput("thin_walled", "boolean")->setInterfaceName("thin_walled");
+}
 
 mx::TypedElementPtr
 select_renderable(const std::vector<mx::TypedElementPtr> &renderables,
@@ -105,11 +124,17 @@ int materialx_to_mdl(const Options &options) {
   const mx::FileSearchPath search_path = materialx_search_path();
   mx::DocumentPtr document = mx::createDocument();
   load_materialx_libraries(document, search_path);
+  connect_standard_surface_thin_walled(document);
   mx::readFromXmlFile(document, mx::FilePath(options.input.string()),
                       search_path);
 
   const auto generator = mx::MdlShaderGenerator::create();
   mx::GenContext context(generator);
+  mx::DefaultColorManagementSystemPtr color_management =
+      mx::DefaultColorManagementSystem::create(generator->getTarget());
+  color_management->loadLibrary(document);
+  generator->setColorManagementSystem(color_management);
+  context.getOptions().targetColorSpaceOverride = "lin_rec709";
   context.registerSourceCodeSearchPath(
       mx::FilePath(options.input.parent_path().string()));
   context.registerSourceCodeSearchPath(search_path);

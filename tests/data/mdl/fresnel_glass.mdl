@@ -1,0 +1,24 @@
+mdl 1.7;
+
+import ::df::*;
+
+export material fresnel_glass(
+    color tint = color(0.9, 0.95, 1.0)
+) = material(
+    thin_walled: true,
+    surface: material_surface(
+        scattering: df::fresnel_layer(
+            ior: 1.6,
+            weight: 1.0,
+            layer: df::microfacet_ggx_smith_bsdf(
+                roughness_u: 0.0,
+                roughness_v: 0.0,
+                mode: df::scatter_reflect),
+            base: df::microfacet_ggx_smith_bsdf(
+                roughness_u: 0.0,
+                roughness_v: 0.0,
+                tint: tint,
+                mode: df::scatter_transmit))
+    ),
+    ior: color(1.6)
+);

@@ -24,6 +24,12 @@ roughness in layered reflection and transmission cannot always be preserved.
 Standalone reflection-only GGX uses a metallic approximation because its MDL
 reflection mode does not apply dielectric Fresnel attenuation. The resulting
 grazing-angle reflectance can differ.
+Supported conditional BSDFs select between approximated surface inputs using
+their original conditions. Fresnel layers and specular coatings are
+approximations and can still differ visibly, especially for thin-walled glass.
+The scalar IOR used for MDL Abbe dispersion does not reproduce dispersion.
+For MDL generation, the loaded standard-surface implementation is adjusted to
+forward its uniform `thin_walled` input to the surface constructor.
 Not every MDL operation has a standard MaterialX equivalent. In particular,
 multiscatter tint and BSDF handles are not fully represented, and emission
 normalization may differ. Unsupported expressions and material slots are
@@ -31,6 +37,24 @@ reported as warnings; an unsupported top-level surface BSDF is approximated
 with neutral gray diffuse. Texture conversion requires the MDL OpenImageIO plugin; other
 unsupported features include measured distributions, hair, and volume
 conversion. Generated documents are validated before they are written.
+`base::file_texture` color and average-mono outputs retain their image,
+color scale, and offset; other mono modes are not yet translated. UV-space
+`base::coordinate_source` and supported `base::transform_coordinate` matrices
+preserve their UV coordinates, including parameterized matrix products.
+Unsupported coordinate expressions fall back to UV0 with a warning.
+Tangent-space normal textures and transformed tangent frames are translated
+where supported. A BSDF layer normal is approximated using the shared
+standard-surface normal, so independently layered normals may differ.
+Object-space projections, other matrix expressions, mirrored normal-map
+wrapping, cropping, clipping, and animation can still differ.
+MDL gamma 2.2 images are tagged `g22_rec709`; MDL generation uses MaterialX
+color management to convert tagged colors into linear Rec.709. Non-color image
+lookups may not receive the same gamma correction.
+Constant-component vector indexing, numeric and boolean conditionals, and
+scalar `math::fmod` are translated. `base::blend_color_layers` supports
+constructor arrays with blend and add modes; other modes are reported as
+unsupported. When only one conditional branch can be translated, it is used
+for both branches with a warning.
 
 ## Build
 

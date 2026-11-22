@@ -1,0 +1,21 @@
+mdl 1.7;
+
+import ::df::*;
+
+export material specular_coat(
+    float coating = 0.25,
+    color tint = color(0.8, 0.9, 1.0)
+) = material(
+    surface: material_surface(
+        scattering: df::weighted_layer(
+            weight: coating,
+            layer: df::specular_bsdf(
+                tint: tint,
+                mode: df::scatter_reflect),
+            base: df::microfacet_ggx_smith_bsdf(
+                roughness_u: 0.0,
+                roughness_v: 0.0,
+                mode: df::scatter_reflect_transmit))
+    ),
+    ior: color(1.6)
+);

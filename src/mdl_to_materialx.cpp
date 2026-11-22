@@ -25,6 +25,7 @@
 #include <mi/neuraylib/itransaction.h>
 #include <mi/neuraylib/ivalue.h>
 
+#include <array>
 #include <cstddef>
 #include <filesystem>
 #include <iomanip>
@@ -494,16 +495,22 @@ public:
 
     using S = mdl::IFunction_definition;
     const auto semantic = definition->get_semantic();
+    if (semantic == S::DS_TERNARY)
+      return approximate_conditional_bsdf(call, surface, layer_weight,
+                                          tint_override);
     if (semantic == S::DS_INTRINSIC_DF_DIFFUSE_REFLECTION_BSDF)
       return approximate_diffuse(call, surface, layer_weight, tint_override);
     if (semantic == S::DS_INTRINSIC_DF_MICROFACET_GGX_SMITH_BSDF)
       return approximate_microfacet(call, surface, layer_weight,
                                     tint_override);
+    if (semantic == S::DS_INTRINSIC_DF_SPECULAR_BSDF)
+      return approximate_specular(call, surface, layer_weight, tint_override);
     if (semantic == S::DS_INTRINSIC_DF_FRESNEL_FACTOR)
       return approximate_conductor(call, surface, tint_override);
     if (semantic == S::DS_INTRINSIC_DF_THIN_FILM)
       return approximate_thin_film(call, surface, tint_override);
     if (semantic == S::DS_INTRINSIC_DF_WEIGHTED_LAYER ||
+        semantic == S::DS_INTRINSIC_DF_FRESNEL_LAYER ||
         semantic == S::DS_INTRINSIC_DF_CUSTOM_CURVE_LAYER ||
         semantic == S::DS_INTRINSIC_DF_COLOR_CUSTOM_CURVE_LAYER)
       return approximate_layer(call, surface, tint_override, semantic);
@@ -566,8 +573,90 @@ private:
   void set_preview_value(const mx::NodePtr &surface,
                          const std::string &input_name,
                          const std::string &value) {
-    if (mx::InputPtr input = surface->getInput(input_name))
+    if (mx::InputPtr input = surface->getInput(input_name)) {
+      input->setConnectedNode(nullptr);
+      input->removeAttribute(mx::ValueElement::INTERFACE_NAME_ATTRIBUTE);
       input->setValueString(value);
+    }
+  }
+
+  MxExpression input_expression(const mx::InputPtr &input) {
+    if (mx::NodePtr node = input->getConnectedNode())
+      return {node, {}, input->getType()};
+    if (!input->getInterfaceName().empty())
+      return {{}, input->getInterfaceName(), input->getType()};
+    if (input->hasValueString())
+      return make_constant_expression(input->getType(), input->getValueString(),
+                                      "conditional_value");
+    return {};
+  }
+
+  bool approximate_conditional_bsdf(const mdl::IExpression_direct_call *call,
+                                    const mx::NodePtr &surface,
+                                    const MxExpression &layer_weight,
+                                    const MxExpression &tint_override) {
+    MxExpression condition = translate(argument(call, "cond").get());
+    if (!condition.valid() || condition.type != "boolean") {
+      set_diffuse_fallback(surface, "untranslatable BSDF condition");
+      return true;
+    }
+
+    const auto make_branch = [&]() {
+      mx::NodePtr branch = graph_->addNode(
+          "standard_surface", next_name("conditional_branch"), "surfaceshader");
+      for (const mx::InputPtr &input : surface->getInputs()) {
+        mx::InputPtr copy = branch->addInput(input->getName(), input->getType());
+        copy->copyContentFrom(input);
+      }
+      return branch;
+    };
+    mx::NodePtr on_true = make_branch();
+    mx::NodePtr on_false = make_branch();
+    approximate_bsdf(argument(call, "true_exp").get(), on_true, layer_weight,
+                     tint_override);
+    approximate_bsdf(argument(call, "false_exp").get(), on_false, layer_weight,
+                     tint_override);
+
+    for (const mx::InputPtr &target : surface->getInputs()) {
+      mx::InputPtr yes = on_true->getInput(target->getName());
+      mx::InputPtr no = on_false->getInput(target->getName());
+      if (yes->getNodeName() == no->getNodeName() &&
+          yes->getInterfaceName() == no->getInterfaceName() &&
+          yes->getValueString() == no->getValueString()) {
+        target->copyContentFrom(yes);
+        continue;
+      }
+      const std::string type = target->getType();
+      if (type != "float" && type != "color3" && type != "vector3") {
+        report_.warn(material_ + ": conditional BSDF input " + target->getName() +
+                     " has an unsupported MaterialX type.");
+        continue;
+      }
+      MxExpression yes_value = input_expression(yes);
+      MxExpression no_value = input_expression(no);
+      if (!yes_value.valid() || !no_value.valid()) {
+        report_.warn(material_ + ": conditional BSDF input " + target->getName() +
+                     " could not be represented in both branches.");
+        continue;
+      }
+      mx::NodePtr select = graph_->addNode(
+          "ifequal", next_name("conditional_bsdf"), type);
+      select->setNodeDefString("ND_ifequal_" + type + "B");
+      add_node_inputs_from_definition(select);
+      select->getInput("value2")->setValueString("true");
+      connect_expression(condition, select->getInput("value1"), report_,
+                         material_, "BSDF condition");
+      connect_expression(yes_value, select->getInput("in1"), report_, material_,
+                         "true BSDF branch");
+      connect_expression(no_value, select->getInput("in2"), report_, material_,
+                         "false BSDF branch");
+      connect_expression({select, {}, type}, target, report_, material_,
+                         "conditional BSDF input");
+      ++report_.translated_nodes;
+    }
+    graph_->removeNode(on_true->getName());
+    graph_->removeNode(on_false->getName());
+    return true;
   }
 
   void set_diffuse_fallback(const mx::NodePtr &surface,
@@ -620,6 +709,22 @@ private:
     return make_binary_expression("multiply", "color3", left, right, prefix);
   }
 
+  MxExpression make_logical_expression(const std::string &category,
+                                       const MxExpression &left,
+                                       const MxExpression &right = {}) {
+    mx::NodePtr node = graph_->addNode(category, next_name("logical"), "boolean");
+    node->setNodeDefString("ND_logical_" + category);
+    add_node_inputs_from_definition(node);
+    if (!connect_expression(left, node->getInput(category == "not" ? "in" : "in1"),
+                            report_, material_, "logical operand") ||
+        (category != "not" &&
+         !connect_expression(right, node->getInput("in2"), report_, material_,
+                             "logical operand")))
+      return {};
+    ++report_.translated_nodes;
+    return {node, {}, "boolean"};
+  }
+
   MxExpression standard_surface_roughness(const MxExpression &roughness) {
     if (!roughness.valid())
       return {};
@@ -669,6 +774,42 @@ private:
                            const mx::NodePtr &surface,
                            const MxExpression &layer_weight,
                            const MxExpression &tint_override) {
+    mx::InputPtr metalness = surface->getInput("metalness");
+    const bool over_metal = layer_weight.valid() && layer_weight.type == "float" &&
+        metalness && !metalness->hasNodeName() &&
+        metalness->getInterfaceName().empty() &&
+        metalness->getValueString() == "1.0";
+    if (over_metal) {
+      MxExpression base_color = input_expression(surface->getInput("base_color"));
+      MxExpression tint = multiply_colors(translate(argument(call, "tint").get()),
+                                          tint_override, "diffuse_tint");
+      if (!base_color.valid() || !tint.valid())
+        return false;
+      mx::NodePtr mix = graph_->addNode("mix", next_name("metal_diffuse_mix"), "color3");
+      mix->setNodeDefString("ND_mix_color3");
+      add_node_inputs_from_definition(mix);
+      if (!connect_expression(base_color, mix->getInput("bg"), report_, material_,
+                              "metal base color") ||
+          !connect_expression(tint, mix->getInput("fg"), report_, material_,
+                              "diffuse layer color") ||
+          !connect_expression(layer_weight, mix->getInput("mix"), report_, material_,
+                              "diffuse layer weight"))
+        return false;
+      MxExpression one = make_constant_expression("float", "1.0", "metal_weight_one");
+      MxExpression remaining = make_binary_expression(
+          "subtract", "float", one, layer_weight, "metal_weight");
+      if (!remaining.valid())
+        return false;
+      set_preview_value(surface, "base", "1.0");
+      connect_preview_input({mix, {}, "color3"}, surface, "base_color",
+                            "metal and diffuse color");
+      connect_preview_input(remaining, surface, "metalness", "metal fraction");
+      ++report_.translated_nodes;
+      report_.warn(material_ +
+                   ": diffuse over metal was approximated by a standard_surface "
+                   "color and metalness mix.");
+      return true;
+    }
     if (layer_weight.valid())
       connect_preview_input(layer_weight, surface, "base", "diffuse weight");
     else {
@@ -696,7 +837,8 @@ private:
   bool approximate_microfacet(const mdl::IExpression_direct_call *call,
                               const mx::NodePtr &surface,
                               const MxExpression &layer_weight,
-                              const MxExpression &tint_override) {
+                              const MxExpression &tint_override,
+                              bool smooth_specular = false) {
     mi::base::Handle<const mdl::IExpression> mode =
         argument(call, "mode");
     const std::string mode_name = enum_name(mode.get());
@@ -734,8 +876,10 @@ private:
                               "microfacet transmission tint");
     }
 
-    MxExpression roughness = standard_surface_roughness(
-        translate(argument(call, "roughness_u").get()));
+    MxExpression roughness = smooth_specular
+        ? make_constant_expression("float", "0.0", "specular_roughness")
+        : standard_surface_roughness(
+              translate(argument(call, "roughness_u").get()));
     if (roughness.valid()) {
       if (transmit && layer_weight.valid()) {
         connect_preview_input(roughness, surface, "transmission_extra_roughness",
@@ -750,14 +894,37 @@ private:
           set_preview_value(surface, "transmission_extra_roughness", "0.0");
       }
     }
-    report_.warn(material_ +
-                 ": MDL GGX was approximated with standard_surface; "
-                 "anisotropy, backscatter, and multiscatter tint may differ.");
+    if (!smooth_specular)
+      report_.warn(material_ +
+                   ": MDL GGX was approximated with standard_surface; "
+                   "anisotropy, backscatter, and multiscatter tint may differ.");
     if (standalone_reflection)
       report_.warn(material_ +
                    ": reflection-only GGX was approximated as metallic; "
                    "its grazing-angle reflectance may differ.");
     return true;
+  }
+
+  bool approximate_specular(const mdl::IExpression_direct_call *call,
+                            const mx::NodePtr &surface,
+                            const MxExpression &layer_weight,
+                            const MxExpression &tint_override) {
+    if (layer_weight.valid() &&
+        enum_name(argument(call, "mode").get()) == "scatter_reflect") {
+      connect_preview_input(layer_weight, surface, "coat", "specular coat weight");
+      MxExpression tint =
+          multiply_colors(translate(argument(call, "tint").get()),
+                          tint_override, "specular_coat_tint");
+      if (tint.valid())
+        connect_preview_input(tint, surface, "coat_color", "specular coat tint");
+      set_preview_value(surface, "coat_roughness", "0.0");
+      report_.warn(material_ +
+                   ": layered MDL specular reflection was approximated as a "
+                   "standard_surface coat.");
+      return true;
+    }
+    return approximate_microfacet(call, surface, layer_weight, tint_override,
+                                  true);
   }
 
   bool approximate_conductor(const mdl::IExpression_direct_call *call,
@@ -851,6 +1018,22 @@ private:
     return base_mapped;
   }
 
+  void apply_layer_normal(const mdl::IExpression_direct_call *call,
+                          const mx::NodePtr &surface) {
+    mi::base::Handle<const mdl::IExpression> normal = argument(call, "normal");
+    if (!normal || is_state_normal_expression(normal.get(), compiled_, transaction_))
+      return;
+    MxExpression translated = translate(normal.get());
+    if (!translated.valid() || translated.type != "vector3") {
+      report_.warn(material_ + ": the BSDF layer normal could not be represented.");
+      return;
+    }
+    if (connect_preview_input(translated, surface, "normal", "BSDF layer normal"))
+      report_.warn(material_ +
+                   ": the BSDF layer normal was applied to the standard_surface "
+                   "base normal; independently layered normals may differ.");
+  }
+
   bool approximate_layer(const mdl::IExpression_direct_call *call,
                          const mx::NodePtr &surface,
                          const MxExpression &tint_override,
@@ -859,6 +1042,51 @@ private:
         argument(call, "base");
     mi::base::Handle<const mdl::IExpression> layer =
         argument(call, "layer");
+    mi::base::Handle<const mdl::IExpression> resolved_base(base);
+    while (resolved_base && resolved_base->get_kind() == mdl::IExpression::EK_TEMPORARY)
+      resolved_base = compiled_->get_temporary(
+          static_cast<const mdl::IExpression_temporary *>(resolved_base.get())->get_index());
+    mi::base::Handle<const mdl::IExpression> resolved_layer(layer);
+    while (resolved_layer && resolved_layer->get_kind() == mdl::IExpression::EK_TEMPORARY)
+      resolved_layer = compiled_->get_temporary(
+          static_cast<const mdl::IExpression_temporary *>(resolved_layer.get())->get_index());
+    if (semantic == mdl::IFunction_definition::DS_INTRINSIC_DF_COLOR_CUSTOM_CURVE_LAYER &&
+        resolved_base && is_neutral_expression(resolved_base.get()) &&
+        resolved_layer && resolved_layer->get_kind() == mdl::IExpression::EK_DIRECT_CALL) {
+      const auto *layer_call =
+          static_cast<const mdl::IExpression_direct_call *>(resolved_layer.get());
+      const char *name = layer_call->get_definition();
+      mi::base::Handle<const mdl::IFunction_definition> definition(
+          name ? transaction_->access<mdl::IFunction_definition>(name) : nullptr);
+      if (definition &&
+          definition->get_semantic() == mdl::IFunction_definition::DS_INTRINSIC_DF_MICROFACET_GGX_SMITH_BSDF &&
+          enum_name(argument(layer_call, "mode").get()) == "scatter_reflect") {
+        MxExpression reflectivity = translate(argument(call, "normal_reflectivity").get());
+        MxExpression weight = translate(argument(call, "weight").get());
+        MxExpression tint = translate(argument(layer_call, "tint").get());
+        if (reflectivity.valid() && weight.valid() && tint.valid()) {
+          MxExpression color = multiply_colors(reflectivity, weight, "metal_curve_weight");
+          color = multiply_colors(color, tint, "metal_curve_tint");
+          if (tint_override.valid())
+            color = multiply_colors(color, tint_override, "metal_curve_override");
+          if (color.valid()) {
+            set_preview_value(surface, "base", "1.0");
+            set_preview_value(surface, "metalness", "1.0");
+            set_preview_value(surface, "specular", "0.0");
+            connect_preview_input(color, surface, "base_color", "metal curve reflectance");
+            MxExpression roughness =
+                standard_surface_roughness(translate(argument(layer_call, "roughness_u").get()));
+            if (roughness.valid())
+              connect_preview_input(roughness, surface, "specular_roughness", "metal curve roughness");
+            apply_layer_normal(call, surface);
+            report_.warn(material_ +
+                         ": color custom-curve reflection over an empty BSDF "
+                         "was approximated as metallic; its grazing curve may differ.");
+            return true;
+          }
+        }
+      }
+    }
     mi::base::Handle<const mdl::IExpression> weight_expression =
         argument(call, "weight");
     MxExpression weight = translate(weight_expression.get());
@@ -872,11 +1100,17 @@ private:
         approximate_bsdf(base.get(), surface, {}, tint_override);
     const bool layer_mapped =
         approximate_bsdf(layer.get(), surface, weight, tint_override);
+    apply_layer_normal(call, surface);
     if (semantic ==
         mdl::IFunction_definition::DS_INTRINSIC_DF_WEIGHTED_LAYER) {
       report_.warn(material_ +
                    ": MDL weighted_layer was approximated with standard_surface "
                    "base and specular/transmission weights.");
+    } else if (semantic ==
+               mdl::IFunction_definition::DS_INTRINSIC_DF_FRESNEL_LAYER) {
+      report_.warn(material_ +
+                   ": MDL fresnel_layer was approximated with standard_surface; "
+                   "layer IOR and normal may differ.");
     } else {
       report_.warn(material_ +
                    ": MDL custom-curve layer was approximated with standard_surface; "
@@ -1287,6 +1521,7 @@ private:
           compiled_->get_temporary(temporary->get_index()));
       return texture_coordinate_index(value.get());
     }
+
     if (expression->get_kind() != mdl::IExpression::EK_DIRECT_CALL)
       return {};
 
@@ -1324,27 +1559,297 @@ private:
       return {};
     }
 
-    mi::base::Handle<const mdl::IExpression_list> arguments(
-        call->get_arguments());
-    if (!arguments)
+    return {};
+  }
+
+  MxExpression matrix_component(const mdl::IExpression *expression,
+                                mi::Size column, mi::Size row) {
+    if (!expression || column >= 4 || row >= 4)
       return {};
-    std::optional<mi::Sint32> result;
-    for (mi::Size index = 0; index < arguments->get_size(); ++index) {
-      mi::base::Handle<const mdl::IExpression> argument(
-          arguments->get_expression(index));
-      const std::optional<mi::Sint32> nested =
-          texture_coordinate_index(argument.get());
-      if (!nested)
-        continue;
-      if (result && result != nested)
-        return {};
-      result = nested;
+    if (expression->get_kind() == mdl::IExpression::EK_TEMPORARY) {
+      mi::base::Handle<const mdl::IExpression> resolved(
+          compiled_->get_temporary(
+              static_cast<const mdl::IExpression_temporary *>(expression)->get_index()));
+      return matrix_component(resolved.get(), column, row);
     }
-    return result;
+    if (expression->get_kind() == mdl::IExpression::EK_CONSTANT) {
+      mi::base::Handle<const mdl::IValue> value(
+          static_cast<const mdl::IExpression_constant *>(expression)->get_value());
+      if (!value || value->get_kind() != mdl::IValue::VK_MATRIX)
+        return {};
+      const auto *matrix = static_cast<const mdl::IValue_compound *>(value.get());
+      mi::base::Handle<const mdl::IValue_vector> vector(matrix->get_value<mdl::IValue_vector>(column));
+      mi::base::Handle<const mdl::IValue_float> item(
+          vector ? vector->get_value<mdl::IValue_float>(row) : nullptr);
+      return item ? make_constant_expression("float", format_float(item->get_value()),
+                                             "matrix_component")
+                  : MxExpression{};
+    }
+    if (expression->get_kind() != mdl::IExpression::EK_DIRECT_CALL)
+      return {};
+    const auto *call = static_cast<const mdl::IExpression_direct_call *>(expression);
+    const char *name = call->get_definition();
+    mi::base::Handle<const mdl::IFunction_definition> definition(
+        name ? transaction_->access<mdl::IFunction_definition>(name) : nullptr);
+    mi::base::Handle<const mdl::IExpression_list> args(call->get_arguments());
+    if (!definition || !args)
+      return {};
+    if (definition->get_semantic() == mdl::IFunction_definition::DS_MULTIPLY &&
+        args->get_size() == 2) {
+      mi::base::Handle<const mdl::IExpression> left(args->get_expression(mi::Size(0)));
+      mi::base::Handle<const mdl::IExpression> right(args->get_expression(mi::Size(1)));
+      MxExpression result;
+      for (mi::Size k = 0; k < 4; ++k) {
+        MxExpression a = matrix_component(left.get(), k, row);
+        MxExpression b = matrix_component(right.get(), column, k);
+        if (!a.valid() || !b.valid())
+          return {};
+        MxExpression product = make_binary_expression(
+            "multiply", "float", a, b, "matrix_product");
+        result = result.valid()
+                     ? make_binary_expression("add", "float", result, product,
+                                              "matrix_sum")
+                     : product;
+        if (!result.valid())
+          return {};
+      }
+      return result;
+    }
+    if (definition->get_semantic() != mdl::IFunction_definition::DS_MATRIX_ELEM_CONSTRUCTOR ||
+        args->get_size() != 16)
+      return {};
+    mi::base::Handle<const mdl::IExpression> component(
+        args->get_expression(column * 4 + row));
+    MxExpression result = translate(component.get());
+    return result.type == "float" ? result : MxExpression{};
+  }
+
+  MxExpression texture_coordinates(const mdl::IExpression *expression) {
+    if (!expression)
+      return {};
+    if (expression->get_kind() == mdl::IExpression::EK_TEMPORARY) {
+      mi::base::Handle<const mdl::IExpression> resolved(
+          compiled_->get_temporary(
+              static_cast<const mdl::IExpression_temporary *>(expression)->get_index()));
+      return texture_coordinates(resolved.get());
+    }
+    if (expression->get_kind() != mdl::IExpression::EK_DIRECT_CALL)
+      return {};
+    const auto *call = static_cast<const mdl::IExpression_direct_call *>(expression);
+    const char *name = call->get_definition();
+    mi::base::Handle<const mdl::IFunction_definition> definition(
+        name ? transaction_->access<mdl::IFunction_definition>(name) : nullptr);
+    const char *mdl_name = definition ? definition->get_mdl_name() : nullptr;
+    if (!mdl_name)
+      return {};
+    const std::string function(mdl_name);
+    if (definition->get_semantic() ==
+        mdl::IFunction_definition::DS_INTRINSIC_STATE_TEXTURE_COORDINATE) {
+      const std::optional<mi::Sint32> index = texture_coordinate_index(expression);
+      if (!index || *index < 0)
+        return {};
+      mx::NodePtr node = graph_->addNode("texcoord", next_name("texture_coordinates"), "vector3");
+      node->setNodeDefString("ND_texcoord_vector3");
+      add_node_inputs_from_definition(node);
+      node->getInput("index")->setValueString(std::to_string(*index));
+      ++report_.translated_nodes;
+      return {node, {}, "vector3"};
+    }
+    if (function.find("::base::coordinate_source(") == 0) {
+      if (enum_name(argument(call, "coordinate_system").get()) !=
+          "texture_coordinate_uvw")
+        return {};
+      mi::base::Handle<const mdl::IExpression> space = argument(call, "texture_space");
+      MxExpression index = translate(space.get());
+      if (!index.valid() || index.type != "integer")
+        return {};
+      mx::NodePtr node = graph_->addNode("texcoord", next_name("texture_coordinates"), "vector3");
+      node->setNodeDefString("ND_texcoord_vector3");
+      add_node_inputs_from_definition(node);
+      if (!connect_expression(index, node->getInput("index"), report_, material_,
+                              "texture coordinate index"))
+        return {};
+      ++report_.translated_nodes;
+      return {node, {}, "vector3"};
+    }
+    if (function.find("::base::texture_coordinate_info(") == 0) {
+      mi::base::Handle<const mdl::IExpression> position = argument(call, "position");
+      MxExpression result = translate(position.get());
+      return result.type == "vector3" ? result : MxExpression{};
+    }
+    if (function.find("::base::transform_coordinate(") != 0)
+      return {};
+    MxExpression source = texture_coordinates(argument(call, "coordinate").get());
+    mi::base::Handle<const mdl::IExpression> matrix = argument(call, "transform");
+    if (!source.valid() || !matrix)
+      return {};
+    mx::NodePtr output = graph_->addNode("combine3", next_name("transformed_uv"), "vector3");
+    add_node_inputs_from_definition(output);
+    for (mi::Size row = 0; row < 3; ++row) {
+      MxExpression sum = matrix_component(matrix.get(), 3, row);
+      if (!sum.valid())
+        return {};
+      for (mi::Size column = 0; column < 3; ++column) {
+        MxExpression coefficient = matrix_component(matrix.get(), column, row);
+        if (!coefficient.valid())
+          return {};
+        mx::NodePtr channel = graph_->addNode("extract", next_name("uv_component"), "float");
+        channel->setNodeDefString("ND_extract_vector3");
+        add_node_inputs_from_definition(channel);
+        channel->getInput("index")->setValueString(std::to_string(column));
+        if (!connect_expression(source, channel->getInput("in"), report_, material_,
+                                "texture coordinate"))
+          return {};
+        ++report_.translated_nodes;
+        MxExpression product = make_binary_expression(
+            "multiply", "float", coefficient, {channel, {}, "float"}, "uv_product");
+        sum = make_binary_expression("add", "float", sum, product, "uv_sum");
+        if (!sum.valid())
+          return {};
+      }
+      if (!connect_expression(sum, output->getInput("in" + std::to_string(row + 1)),
+                              report_, material_, "transformed texture coordinate"))
+        return {};
+    }
+    ++report_.translated_nodes;
+    return {output, {}, "vector3"};
+  }
+
+  MxExpression texture_tangent(const mdl::IExpression *expression, bool u) {
+    if (!expression)
+      return {};
+    if (expression->get_kind() == mdl::IExpression::EK_TEMPORARY) {
+      mi::base::Handle<const mdl::IExpression> resolved(
+          compiled_->get_temporary(
+              static_cast<const mdl::IExpression_temporary *>(expression)->get_index()));
+      return texture_tangent(resolved.get(), u);
+    }
+    if (expression->get_kind() != mdl::IExpression::EK_DIRECT_CALL)
+      return {};
+    const auto *call = static_cast<const mdl::IExpression_direct_call *>(expression);
+    const char *name = call->get_definition();
+    mi::base::Handle<const mdl::IFunction_definition> definition(
+        name ? transaction_->access<mdl::IFunction_definition>(name) : nullptr);
+    const char *mdl_name = definition ? definition->get_mdl_name() : nullptr;
+    if (!mdl_name)
+      return {};
+    const std::string function(mdl_name);
+    if (function.find("::base::texture_coordinate_info(") == 0) {
+      MxExpression result = translate(argument(call, u ? "tangent_u" : "tangent_v").get());
+      return result.type == "vector3" ? result : MxExpression{};
+    }
+    if (function.find("::base::coordinate_source(") == 0) {
+      if (enum_name(argument(call, "coordinate_system").get()) != "texture_coordinate_uvw")
+        return {};
+      MxExpression index = translate(argument(call, "texture_space").get());
+      if (!index.valid() || index.type != "integer")
+        return {};
+      const std::string kind = u ? "tangent" : "bitangent";
+      mx::NodePtr node = graph_->addNode(kind, next_name("uv_" + kind), "vector3");
+      node->setNodeDefString("ND_" + kind + "_vector3");
+      add_node_inputs_from_definition(node);
+      node->getInput("space")->setValueString("world");
+      if (!connect_expression(index, node->getInput("index"), report_, material_,
+                              "UV tangent index"))
+        return {};
+      ++report_.translated_nodes;
+      return {node, {}, "vector3"};
+    }
+    if (function.find("::base::transform_coordinate(") != 0)
+      return {};
+    mi::base::Handle<const mdl::IExpression> coordinate = argument(call, "coordinate");
+    mi::base::Handle<const mdl::IExpression> matrix = argument(call, "transform");
+    MxExpression tu = texture_tangent(coordinate.get(), true);
+    MxExpression tv = texture_tangent(coordinate.get(), false);
+    MxExpression m00 = matrix_component(matrix.get(), 0, 0);
+    MxExpression m10 = matrix_component(matrix.get(), 1, 0);
+    MxExpression m01 = matrix_component(matrix.get(), 0, 1);
+    MxExpression m11 = matrix_component(matrix.get(), 1, 1);
+    if (!tu.valid() || !tv.valid() || !m00.valid() || !m10.valid() ||
+        !m01.valid() || !m11.valid())
+      return {};
+    MxExpression zero = make_constant_expression("float", "0.0", "uv_tangent_zero");
+    MxExpression neg_m01 =
+        make_binary_expression("subtract", "float", zero, m01, "uv_tangent_neg");
+    mx::NodePtr components = graph_->addNode("combine2", next_name("uv_tangent_components"), "vector2");
+    add_node_inputs_from_definition(components);
+    if (!connect_expression(m11, components->getInput("in1"), report_, material_, "UV tangent") ||
+        !connect_expression(neg_m01, components->getInput("in2"), report_, material_, "UV tangent"))
+      return {};
+    mx::NodePtr normalized = graph_->addNode("normalize", next_name("uv_tangent_normalize"), "vector2");
+    add_node_inputs_from_definition(normalized);
+    if (!connect_expression({components, {}, "vector2"}, normalized->getInput("in"),
+                            report_, material_, "UV tangent"))
+      return {};
+    report_.translated_nodes += 2;
+    std::array<MxExpression, 2> c;
+    for (mi::Size i = 0; i < c.size(); ++i) {
+      mx::NodePtr extract = graph_->addNode("extract", next_name("uv_tangent_component"), "float");
+      extract->setNodeDefString("ND_extract_vector2");
+      add_node_inputs_from_definition(extract);
+      extract->getInput("index")->setValueString(std::to_string(i));
+      if (!connect_expression({normalized, {}, "vector2"}, extract->getInput("in"),
+                              report_, material_, "UV tangent"))
+        return {};
+      c[i] = {extract, {}, "float"};
+      ++report_.translated_nodes;
+    }
+    if (u) {
+      MxExpression dot = make_binary_expression(
+          "add", "float",
+          make_binary_expression("multiply", "float", m00, c[0], "uv_tangent_dot"),
+          make_binary_expression("multiply", "float", m10, c[1], "uv_tangent_dot"),
+          "uv_tangent_dot");
+      for (MxExpression &component : c) {
+        MxExpression neg = make_binary_expression(
+            "subtract", "float", zero, component, "uv_tangent_neg");
+        mx::NodePtr select = graph_->addNode("ifgreater", next_name("uv_tangent_flip"), "float");
+        add_node_inputs_from_definition(select);
+        if (!connect_expression(zero, select->getInput("value1"), report_, material_, "UV tangent") ||
+            !connect_expression(dot, select->getInput("value2"), report_, material_, "UV tangent") ||
+            !connect_expression(neg, select->getInput("in1"), report_, material_, "UV tangent") ||
+            !connect_expression(component, select->getInput("in2"), report_, material_, "UV tangent"))
+          return {};
+        component = {select, {}, "float"};
+        ++report_.translated_nodes;
+      }
+    } else {
+      MxExpression x = make_binary_expression("subtract", "float", zero, c[1], "uv_tangent_neg");
+      c[1] = c[0];
+      c[0] = x;
+    }
+    const auto scaled = [&](const MxExpression &vector, const MxExpression &weight) {
+      mx::NodePtr node = graph_->addNode("multiply", next_name("uv_tangent_scaled"), "vector3");
+      node->setNodeDefString("ND_multiply_vector3FA");
+      add_node_inputs_from_definition(node);
+      if (!connect_expression(vector, node->getInput("in1"), report_, material_, "UV tangent") ||
+          !connect_expression(weight, node->getInput("in2"), report_, material_, "UV tangent"))
+        return MxExpression{};
+      ++report_.translated_nodes;
+      return MxExpression{node, {}, "vector3"};
+    };
+    MxExpression result = make_binary_expression(
+        "add", "vector3", scaled(tu, c[0]), scaled(tv, c[1]), "uv_tangent");
+    MxExpression length_squared = make_binary_expression(
+        "add", "float",
+        make_binary_expression("multiply", "float", m01, m01, "uv_tangent_length"),
+        make_binary_expression("multiply", "float", m11, m11, "uv_tangent_length"),
+        "uv_tangent_length");
+    mx::NodePtr select = graph_->addNode("ifgreater", next_name("uv_tangent_valid"), "vector3");
+    add_node_inputs_from_definition(select);
+    if (!connect_expression(length_squared, select->getInput("value1"), report_, material_, "UV tangent") ||
+        !connect_expression(zero, select->getInput("value2"), report_, material_, "UV tangent") ||
+        !connect_expression(result, select->getInput("in1"), report_, material_, "UV tangent") ||
+        !connect_expression(u ? tu : tv, select->getInput("in2"), report_, material_, "UV tangent"))
+      return {};
+    ++report_.translated_nodes;
+    return {select, {}, "vector3"};
   }
 
   MxExpression translate_texture_lookup(
-      const mdl::IExpression_direct_call *expression) {
+      const mdl::IExpression_direct_call *expression,
+      bool base_file_texture = false,
+      const std::string &base_output_type = "color3") {
     mi::base::Handle<const mdl::IExpression_list> arguments(
         expression->get_arguments());
     mi::base::Handle<const mdl::IExpression> texture_expression;
@@ -1359,9 +1864,9 @@ private:
         mi::base::Handle<const mdl::IExpression> argument(
             arguments->get_expression(index));
         const std::string name(argument_name);
-        if (name == "tex")
+        if (name == (base_file_texture ? "texture" : "tex"))
           texture_expression = argument;
-        else if (name == "coord")
+        else if (name == (base_file_texture ? "uvw" : "coord"))
           coordinate_expression = argument;
         else if (name == "wrap_u")
           wrap_u_expression = argument;
@@ -1395,6 +1900,7 @@ private:
 
     const auto *texture =
         static_cast<const mdl::IValue_texture *>(resource_value.get());
+    float gamma = texture->get_gamma();
     mi::base::Handle<const mdl::IType_texture> texture_type(
         texture->get_type());
     if (texture_type->get_shape() != mdl::IType_texture::TS_2D) {
@@ -1409,6 +1915,8 @@ private:
         texture_name && texture_name[0]) {
       mi::base::Handle<const mdl::ITexture> texture_object(
           transaction_->access<mdl::ITexture>(texture_name));
+      if (texture_object && gamma == 0.0f)
+        gamma = texture_object->get_effective_gamma(0, 0);
       const char *image_name =
           texture_object ? texture_object->get_image() : nullptr;
       mi::base::Handle<const mdl::IImage> image(
@@ -1469,7 +1977,7 @@ private:
     mi::base::Handle<const mdl::IType> expression_type(
         expression->get_type());
     const std::string output_type =
-        mdl_type_to_materialx(expression_type.get());
+        base_file_texture ? base_output_type : mdl_type_to_materialx(expression_type.get());
     if (output_type != "float" && output_type != "color3" &&
         output_type != "vector2" && output_type != "vector3" &&
         output_type != "vector4") {
@@ -1489,8 +1997,16 @@ private:
       return {};
     }
     file_input->setValueString(materialx_path);
-    if (texture->get_gamma() > 1.8f && texture->get_gamma() < 2.5f)
-      file_input->setColorSpace("srgb_texture");
+    if (gamma == 2.2f) {
+      file_input->setColorSpace("g22_rec709");
+      if (output_type != "color3")
+        report_.warn(material_ +
+                     ": gamma correction for non-color texture lookups "
+                     "may not be applied by MaterialX shader generators.");
+    } else if (gamma != 1.0f)
+      report_.warn(material_ + ": MDL texture gamma " +
+                   format_float(gamma) +
+                   " cannot be represented by the supported color spaces.");
 
     const auto connect_wrap_mode = [&image](const std::string &input,
                                             const std::string &mode) {
@@ -1508,36 +2024,286 @@ private:
     if (wrap_v_expression)
       connect_wrap_mode("vaddressmode", enum_name(wrap_v_expression.get()));
 
-    const std::optional<mi::Sint32> coordinate_index =
-        texture_coordinate_index(coordinate_expression.get());
-    if (coordinate_index) {
+    const auto connect_uv_set = [&](mi::Sint32 index) {
       mx::NodePtr coordinates =
           graph_->addNode("texcoord", next_name("texture_coordinates"),
                           "vector2");
       coordinates->setNodeDefString("ND_texcoord_vector2");
       add_node_inputs_from_definition(coordinates);
       coordinates->getInput("index")->setValueString(
-          std::to_string(*coordinate_index));
+          std::to_string(index));
       image->getInput("texcoord")->setConnectedNode(coordinates);
       ++report_.translated_nodes;
-      report_.warn(
-          material_ +
-          ": MDL texture coordinates were mapped to the matching MaterialX "
-          "UV set; coordinate transforms may differ.");
-    } else {
-      MxExpression coordinates = translate(coordinate_expression.get());
-      if (coordinates.valid() && coordinates.type == "vector2") {
-        connect_expression(coordinates, image->getInput("texcoord"), report_,
-                           material_, "texture coordinates");
+    };
+    MxExpression coordinates = base_file_texture
+                                   ? texture_coordinates(coordinate_expression.get())
+                                   : translate(coordinate_expression.get());
+    if (coordinates.valid() && coordinates.type == "vector3") {
+      mx::NodePtr convert =
+          graph_->addNode("convert", next_name("uv_vector2"), "vector2");
+      convert->setNodeDefString("ND_convert_vector3_vector2");
+      add_node_inputs_from_definition(convert);
+      if (connect_expression(coordinates, convert->getInput("in"), report_,
+                             material_, "texture coordinates")) {
+        coordinates = {convert, {}, "vector2"};
+        ++report_.translated_nodes;
       } else {
-        report_.warn(material_ +
-                     ": MDL texture coordinates could not be represented; "
-                     "MaterialX's default UV0 is used.");
+        coordinates = {};
       }
+    }
+    if (coordinates.valid() && coordinates.type == "vector2") {
+      if (!connect_expression(coordinates, image->getInput("texcoord"), report_,
+                              material_, "texture coordinates"))
+        return {};
+    } else {
+      connect_uv_set(0);
+      report_.warn(material_ +
+                   ": MDL texture coordinates could not be represented; "
+                   "MaterialX's default UV0 is used.");
     }
 
     ++report_.translated_nodes;
     return {image, {}, output_type};
+  }
+
+  MxExpression translate_normal_texture(
+      const mdl::IExpression_direct_call *call) {
+    MxExpression image = translate_texture_lookup(call, true, "vector3");
+    MxExpression factor = translate(argument(call, "factor").get());
+    MxExpression flip_u = translate(argument(call, "flip_tangent_u").get());
+    MxExpression flip_v = translate(argument(call, "flip_tangent_v").get());
+    if (!image.valid() || !factor.valid() || factor.type != "float" ||
+        !flip_u.valid() || flip_u.type != "boolean" ||
+        !flip_v.valid() || flip_v.type != "boolean")
+      return {};
+    MxExpression zero = make_constant_expression("float", "0.0", "normal_zero");
+    MxExpression negative =
+        make_binary_expression("subtract", "float", zero, factor, "normal_flip");
+    const auto select_scale = [&](const MxExpression &flip) -> MxExpression {
+      mx::NodePtr select = graph_->addNode("ifequal", next_name("normal_scale"), "float");
+      select->setNodeDefString("ND_ifequal_floatB");
+      add_node_inputs_from_definition(select);
+      select->getInput("value2")->setValueString("true");
+      if (!connect_expression(flip, select->getInput("value1"), report_, material_,
+                              "normal map flip") ||
+          !connect_expression(negative, select->getInput("in1"), report_, material_,
+                              "normal map flipped scale") ||
+          !connect_expression(factor, select->getInput("in2"), report_, material_,
+                              "normal map scale"))
+        return {};
+      ++report_.translated_nodes;
+      return {select, {}, "float"};
+    };
+    MxExpression scale_u = select_scale(flip_u);
+    MxExpression scale_v = select_scale(flip_v);
+    if (!scale_u.valid() || !scale_v.valid())
+      return {};
+    std::array<MxExpression, 3> channels;
+    for (mi::Size i = 0; i < channels.size(); ++i) {
+      mx::NodePtr extract = graph_->addNode("extract", next_name("normal_channel"), "float");
+      extract->setNodeDefString("ND_extract_vector3");
+      add_node_inputs_from_definition(extract);
+      extract->getInput("index")->setValueString(std::to_string(i));
+      if (!connect_expression(image, extract->getInput("in"), report_, material_,
+                              "normal map channel"))
+        return {};
+      channels[i] = {extract, {}, "float"};
+      ++report_.translated_nodes;
+    }
+    MxExpression one = make_constant_expression("float", "1.0", "normal_one");
+    MxExpression two = make_constant_expression("float", "2.0", "normal_two");
+    MxExpression z = make_binary_expression("multiply", "float", channels[2], two, "normal_z");
+    z = make_binary_expression("subtract", "float", z, one, "normal_z");
+    z = make_binary_expression("multiply", "float", z, factor, "normal_z");
+    if (!z.valid())
+      return {};
+    mx::NodePtr absolute = graph_->addNode("absval", next_name("normal_z_abs"), "float");
+    add_node_inputs_from_definition(absolute);
+    if (!connect_expression(z, absolute->getInput("in"), report_, material_, "normal map Z"))
+      return {};
+    ++report_.translated_nodes;
+    MxExpression baseline =
+        make_binary_expression("subtract", "float", one, factor, "normal_z_baseline");
+    z = make_binary_expression("add", "float", {absolute, {}, "float"}, baseline, "normal_z");
+    z = make_binary_expression("add", "float", z, one, "normal_z");
+    z = make_binary_expression("divide", "float", z, two, "normal_z");
+    if (!z.valid())
+      return {};
+    mx::NodePtr encoded = graph_->addNode("combine3", next_name("normal_encoded"), "vector3");
+    add_node_inputs_from_definition(encoded);
+    if (!connect_expression(channels[0], encoded->getInput("in1"), report_, material_, "normal map X") ||
+        !connect_expression(channels[1], encoded->getInput("in2"), report_, material_, "normal map Y") ||
+        !connect_expression(z, encoded->getInput("in3"), report_, material_, "normal map Z"))
+      return {};
+    ++report_.translated_nodes;
+    mx::NodePtr scale = graph_->addNode("combine2", next_name("normal_scale"), "vector2");
+    add_node_inputs_from_definition(scale);
+    if (!connect_expression(scale_u, scale->getInput("in1"), report_, material_,
+                            "normal map U scale") ||
+        !connect_expression(scale_v, scale->getInput("in2"), report_, material_,
+                            "normal map V scale"))
+      return {};
+    mx::NodePtr normal = graph_->addNode("normalmap", next_name("normal_map"), "vector3");
+    normal->setNodeDefString("ND_normalmap_vector2");
+    add_node_inputs_from_definition(normal);
+    mx::NodePtr direction = graph_->addNode("normal", next_name("normal_direction"), "vector3");
+    direction->setNodeDefString("ND_normal_vector3");
+    add_node_inputs_from_definition(direction);
+    direction->getInput("space")->setValueString("world");
+    normal->getInput("normal")->setConnectedNode(direction);
+    ++report_.translated_nodes;
+    mi::base::Handle<const mdl::IExpression> uvw = argument(call, "uvw");
+    for (const bool u : {true, false}) {
+      const std::string name = u ? "tangent" : "bitangent";
+      MxExpression tangent = texture_tangent(uvw.get(), u);
+      if (!tangent.valid()) {
+        mx::NodePtr fallback = graph_->addNode(name, next_name("normal_" + name), "vector3");
+        fallback->setNodeDefString("ND_" + name + "_vector3");
+        add_node_inputs_from_definition(fallback);
+        fallback->getInput("space")->setValueString("world");
+        tangent = {fallback, {}, "vector3"};
+        ++report_.translated_nodes;
+        report_.warn(material_ + ": the normal map tangent could not be represented; "
+                     "the default UV0 tangent is used.");
+      }
+      if (!connect_expression(tangent, normal->getInput(name), report_, material_,
+                              "normal map tangent"))
+        return {};
+    }
+    if (!connect_expression({encoded, {}, "vector3"}, normal->getInput("in"), report_, material_,
+                            "normal map image") ||
+        !connect_expression({scale, {}, "vector2"}, normal->getInput("scale"), report_,
+                            material_, "normal map scale"))
+      return {};
+    report_.translated_nodes += 2;
+    report_.warn(material_ +
+                 ": tangent-space normal texture was approximated with a "
+                 "MaterialX normalmap; mirrored wrapping, clipping and crop "
+                 "may differ.");
+    return {normal, {}, "vector3"};
+  }
+
+  MxExpression translate_color_layers(
+      const mdl::IExpression_direct_call *call, bool mono) {
+    if (mono && enum_name(argument(call, "mono_source").get()) != "mono_average") {
+      report_.warn(material_ + ": blend_color_layers mono supports only "
+                   "mono_average; the mono output was omitted.");
+      return {};
+    }
+    mi::base::Handle<const mdl::IExpression> layers = argument(call, "layers");
+    while (layers && layers->get_kind() == mdl::IExpression::EK_TEMPORARY)
+      layers = compiled_->get_temporary(
+          static_cast<const mdl::IExpression_temporary *>(layers.get())->get_index());
+    if (!layers || layers->get_kind() != mdl::IExpression::EK_DIRECT_CALL)
+      return {};
+    const auto *array = static_cast<const mdl::IExpression_direct_call *>(layers.get());
+    if (!array->get_definition() ||
+        std::string(array->get_definition()) != "mdl::T[](...)")
+      return {};
+    mi::base::Handle<const mdl::IExpression_list> entries(array->get_arguments());
+    MxExpression result = translate(argument(call, "base").get());
+    if (!entries || !result.valid() || result.type != "color3")
+      return {};
+    for (mi::Size i = 0; i < entries->get_size(); ++i) {
+      mi::base::Handle<const mdl::IExpression> entry(entries->get_expression(i));
+      while (entry && entry->get_kind() == mdl::IExpression::EK_TEMPORARY)
+        entry = compiled_->get_temporary(
+            static_cast<const mdl::IExpression_temporary *>(entry.get())->get_index());
+      if (!entry || entry->get_kind() != mdl::IExpression::EK_DIRECT_CALL)
+        return {};
+      const auto *layer = static_cast<const mdl::IExpression_direct_call *>(entry.get());
+      const char *name = layer->get_definition();
+      mi::base::Handle<const mdl::IFunction_definition> definition(
+          name ? transaction_->access<mdl::IFunction_definition>(name) : nullptr);
+      const char *mdl_name = definition ? definition->get_mdl_name() : nullptr;
+      if (!mdl_name || std::string(mdl_name).find("::base::color_layer(") != 0)
+        return {};
+      const std::string mode = enum_name(argument(layer, "mode").get());
+      if (mode != "color_layer_blend" && mode != "color_layer_add") {
+        report_.warn(material_ + ": unsupported blend_color_layers mode " +
+                     (mode.empty() ? "<nonconstant>" : mode) + ".");
+        return {};
+      }
+      MxExpression color = translate(argument(layer, "layer_color").get());
+      MxExpression weight = translate(argument(layer, "weight").get());
+      if (!color.valid() || color.type != "color3" ||
+          !weight.valid() || weight.type != "float")
+        return {};
+      if (mode == "color_layer_add")
+        color = make_binary_expression("add", "color3", result, color,
+                                       "color_layer_add");
+      if (!color.valid())
+        return {};
+      mx::NodePtr mix = graph_->addNode("mix", next_name("color_layer"), "color3");
+      mix->setNodeDefString("ND_mix_color3");
+      add_node_inputs_from_definition(mix);
+      if (!connect_expression(result, mix->getInput("bg"), report_, material_,
+                              "color layer base") ||
+          !connect_expression(color, mix->getInput("fg"), report_, material_,
+                              "color layer color") ||
+          !connect_expression(weight, mix->getInput("mix"), report_, material_,
+                              "color layer weight"))
+        return {};
+      ++report_.translated_nodes;
+      result = {mix, {}, "color3"};
+    }
+    return mono ? scalarize_color(result, "color_layer_average") : result;
+  }
+
+  MxExpression translate_file_texture_field(
+      const mdl::IExpression_direct_call *field, bool mono) {
+    mi::base::Handle<const mdl::IExpression_list> field_arguments(
+        field->get_arguments());
+    mi::base::Handle<const mdl::IExpression> source(
+        field_arguments && field_arguments->get_size() == 1
+            ? field_arguments->get_expression(mi::Size(0))
+            : nullptr);
+    while (source && source->get_kind() == mdl::IExpression::EK_TEMPORARY) {
+      source = compiled_->get_temporary(
+          static_cast<const mdl::IExpression_temporary *>(source.get())
+              ->get_index());
+    }
+    if (!source || source->get_kind() != mdl::IExpression::EK_DIRECT_CALL)
+      return {};
+    const auto *call =
+        static_cast<const mdl::IExpression_direct_call *>(source.get());
+    const char *name = call->get_definition();
+    mi::base::Handle<const mdl::IFunction_definition> definition(
+        name ? transaction_->access<mdl::IFunction_definition>(name) : nullptr);
+    const char *mdl_name = definition ? definition->get_mdl_name() : nullptr;
+    if (mdl_name && std::string(mdl_name).find("::base::blend_color_layers(") == 0)
+      return translate_color_layers(call, mono);
+    if (!mdl_name || std::string(mdl_name).find("::base::file_texture(") != 0) {
+      report_.warn(material_ + ": unsupported texture_return source " +
+                   (mdl_name ? mdl_name : "<unresolved>") + ".");
+      return {};
+    }
+
+    if (mono && enum_name(argument(call, "mono_source").get()) != "mono_average") {
+      report_.warn(material_ +
+                   ": base::file_texture mono supports only mono_average; "
+                   "the mono output was omitted.");
+      return {};
+    }
+    MxExpression image = translate_texture_lookup(call, true);
+    MxExpression scale = translate(argument(call, "color_scale").get());
+    MxExpression offset = translate(argument(call, "color_offset").get());
+    if (!image.valid() || !scale.valid() || !offset.valid())
+      return {};
+    MxExpression scaled =
+        make_binary_expression("multiply", "color3", image, scale,
+                               "file_texture_scale");
+    if (!scaled.valid())
+      return {};
+    MxExpression color =
+        make_binary_expression("add", "color3", scaled, offset,
+                               "file_texture_offset");
+    if (!color.valid())
+      return {};
+    report_.warn(material_ +
+                 ": base::file_texture crop, clip, animation and coordinate "
+                 "transforms may differ.");
+    return mono ? scalarize_color(color, "file_texture_average") : color;
   }
 
   MxExpression translate_weighted_layer(
@@ -1749,6 +2515,268 @@ private:
     }
 
     const auto semantic = definition->get_semantic();
+    const char *mdl_name = definition->get_mdl_name();
+    if (semantic == mdl::IFunction_definition::DS_INTRINSIC_STATE_TEXTURE_TANGENT_U ||
+        semantic == mdl::IFunction_definition::DS_INTRINSIC_STATE_TEXTURE_TANGENT_V) {
+      MxExpression index = translate(argument(expression, "index").get());
+      if (!index.valid() || index.type != "integer")
+        return {};
+      const std::string kind =
+          semantic == mdl::IFunction_definition::DS_INTRINSIC_STATE_TEXTURE_TANGENT_U
+              ? "tangent" : "bitangent";
+      mx::NodePtr tangent = graph_->addNode(kind, next_name("texture_" + kind), "vector3");
+      tangent->setNodeDefString("ND_" + kind + "_vector3");
+      add_node_inputs_from_definition(tangent);
+      tangent->getInput("space")->setValueString("world");
+      if (!connect_expression(index, tangent->getInput("index"), report_, material_,
+                              "texture tangent index"))
+        return {};
+      ++report_.translated_nodes;
+      return {tangent, {}, "vector3"};
+    }
+    if (mdl_name && std::string(mdl_name).find("::base::tangent_space_normal_texture(") == 0)
+      return translate_normal_texture(expression);
+    if (semantic == mdl::IFunction_definition::DS_INTRINSIC_STATE_TEXTURE_COORDINATE)
+      return texture_coordinates(expression);
+    if (semantic == mdl::IFunction_definition::DS_INTRINSIC_DAG_FIELD_ACCESS &&
+        mdl_name) {
+      const std::string name(mdl_name);
+      if (name == "::base::texture_coordinate_info.position(::base::texture_coordinate_info)") {
+        mi::base::Handle<const mdl::IExpression_list> args(expression->get_arguments());
+        mi::base::Handle<const mdl::IExpression> source(
+            args && args->get_size() == 1 ? args->get_expression(mi::Size(0)) : nullptr);
+        return texture_coordinates(source.get());
+      }
+      if (name == "::base::texture_coordinate_info.tangent_u(::base::texture_coordinate_info)" ||
+          name == "::base::texture_coordinate_info.tangent_v(::base::texture_coordinate_info)") {
+        mi::base::Handle<const mdl::IExpression_list> args(expression->get_arguments());
+        mi::base::Handle<const mdl::IExpression> source(
+            args && args->get_size() == 1 ? args->get_expression(mi::Size(0)) : nullptr);
+        return texture_tangent(source.get(), name.find(".tangent_u(") != std::string::npos);
+      }
+      if (name == "::base::texture_return.tint(::base::texture_return)" ||
+          name == "::base::texture_return.mono(::base::texture_return)") {
+        MxExpression result = translate_file_texture_field(
+            expression, name.find(".mono(") != std::string::npos);
+        if (!result.valid())
+          report_.warn(material_ + ": unsupported " + name +
+                       " source; that expression was omitted.");
+        return result;
+      }
+    }
+    if (mdl_name && std::string(mdl_name) ==
+                        "::base::abbe_number_ior(float,float)") {
+      report_.warn(material_ +
+                   ": Abbe dispersion is omitted from the scalar MaterialX IOR.");
+      return translate(argument(expression, "ior").get());
+    }
+    using S = mdl::IFunction_definition;
+    if (semantic == S::DS_INTRINSIC_MATH_FMOD) {
+      mi::base::Handle<const mdl::IExpression_list> args(expression->get_arguments());
+      if (!args || args->get_size() != 2)
+        return {};
+      MxExpression x = translate(mi::base::Handle<const mdl::IExpression>(
+          args->get_expression(mi::Size(0))).get());
+      MxExpression y = translate(mi::base::Handle<const mdl::IExpression>(
+          args->get_expression(mi::Size(1))).get());
+      if (!x.valid() || !y.valid() || x.type != "float" || y.type != "float") {
+        report_.warn(material_ + ": only scalar math::fmod is supported.");
+        return {};
+      }
+      MxExpression quotient =
+          make_binary_expression("divide", "float", x, y, "fmod_quotient");
+      mx::NodePtr absolute = graph_->addNode("absval", next_name("fmod_abs"), "float");
+      add_node_inputs_from_definition(absolute);
+      mx::NodePtr sign = graph_->addNode("sign", next_name("fmod_sign"), "float");
+      add_node_inputs_from_definition(sign);
+      mx::NodePtr floor = graph_->addNode("floor", next_name("fmod_floor"), "float");
+      add_node_inputs_from_definition(floor);
+      if (!connect_expression(quotient, absolute->getInput("in"), report_, material_,
+                              "fmod quotient") ||
+          !connect_expression(quotient, sign->getInput("in"), report_, material_,
+                              "fmod quotient") ||
+          !connect_expression({absolute, {}, "float"}, floor->getInput("in"), report_,
+                              material_, "fmod absolute quotient"))
+        return {};
+      report_.translated_nodes += 3;
+      MxExpression truncated = make_binary_expression(
+          "multiply", "float", {floor, {}, "float"}, {sign, {}, "float"},
+          "fmod_truncated");
+      MxExpression multiple =
+          make_binary_expression("multiply", "float", truncated, y, "fmod_multiple");
+      return make_binary_expression("subtract", "float", x, multiple, "fmod");
+    }
+    if (semantic == S::DS_ARRAY_INDEX) {
+      mi::base::Handle<const mdl::IExpression> source = argument(expression, "a");
+      mi::base::Handle<const mdl::IExpression> index = argument(expression, "i");
+      mi::base::Handle<const mdl::IType> source_type(
+          source ? source->get_type() : nullptr);
+      const std::string type = mdl_type_to_materialx(source_type.get());
+      if ((type != "vector2" && type != "vector3" && type != "vector4") ||
+          !index || index->get_kind() != mdl::IExpression::EK_CONSTANT) {
+        report_.warn(material_ + ": MDL indexed access requires a vector and "
+                     "a constant component index.");
+        return {};
+      }
+      mi::base::Handle<const mdl::IValue> index_value(
+          static_cast<const mdl::IExpression_constant *>(index.get())->get_value());
+      if (!index_value || index_value->get_kind() != mdl::IValue::VK_INT)
+        return {};
+      const mi::Sint32 component =
+          static_cast<const mdl::IValue_int *>(index_value.get())->get_value();
+      if (component < 0 || component >= type.back() - '0') {
+        report_.warn(material_ + ": MDL vector component index is out of range.");
+        return {};
+      }
+      MxExpression value = translate(source.get());
+      if (!value.valid())
+        return {};
+      mx::NodePtr extract = graph_->addNode("extract", next_name("channel"), "float");
+      extract->setNodeDefString("ND_extract_" + type);
+      add_node_inputs_from_definition(extract);
+      extract->getInput("index")->setValueString(std::to_string(component));
+      if (!connect_expression(value, extract->getInput("in"), report_, material_,
+                              "vector component"))
+        return {};
+      ++report_.translated_nodes;
+      return {extract, {}, "float"};
+    }
+    if (semantic == S::DS_TERNARY) {
+      MxExpression condition = translate(argument(expression, "cond").get());
+      MxExpression yes = translate(argument(expression, "true_exp").get());
+      MxExpression no = translate(argument(expression, "false_exp").get());
+      if (!yes.valid() || !no.valid()) {
+        if (yes.valid() != no.valid()) {
+          report_.warn(material_ +
+                       ": one conditional expression branch was omitted; "
+                       "using the translatable branch for both cases.");
+          return yes.valid() ? yes : no;
+        }
+        return {};
+      }
+      if (!condition.valid() || condition.type != "boolean" ||
+          yes.type != no.type ||
+          (yes.type != "boolean" && yes.type != "float" && yes.type != "color3" &&
+           yes.type != "vector2" && yes.type != "vector3" &&
+           yes.type != "vector4")) {
+        report_.warn(material_ + ": conditional expression cannot be represented.");
+        return {};
+      }
+      if (yes.type == "boolean") {
+        MxExpression not_condition = make_logical_expression("not", condition);
+        MxExpression yes_branch = make_logical_expression("and", condition, yes);
+        MxExpression no_branch = make_logical_expression("and", not_condition, no);
+        return make_logical_expression("or", yes_branch, no_branch);
+      }
+      mx::NodePtr select =
+          graph_->addNode("ifequal", next_name("conditional"), yes.type);
+      select->setNodeDefString("ND_ifequal_" + yes.type + "B");
+      add_node_inputs_from_definition(select);
+      select->getInput("value2")->setValueString("true");
+      if (!connect_expression(condition, select->getInput("value1"), report_,
+                              material_, "conditional expression") ||
+          !connect_expression(yes, select->getInput("in1"), report_, material_,
+                              "conditional true value") ||
+          !connect_expression(no, select->getInput("in2"), report_, material_,
+                              "conditional false value"))
+        return {};
+      ++report_.translated_nodes;
+      return {select, {}, yes.type};
+    }
+    if (semantic == S::DS_LOGICAL_OR || semantic == S::DS_LOGICAL_AND ||
+        semantic == S::DS_LOGICAL_NOT) {
+      mi::base::Handle<const mdl::IExpression_list> args(expression->get_arguments());
+      const mi::Size expected = semantic == S::DS_LOGICAL_NOT ? 1 : 2;
+      if (!args || args->get_size() != expected)
+        return {};
+      MxExpression left = translate(mi::base::Handle<const mdl::IExpression>(
+          args->get_expression(mi::Size(0))).get());
+      MxExpression right;
+      if (expected == 2)
+        right = translate(mi::base::Handle<const mdl::IExpression>(
+            args->get_expression(mi::Size(1))).get());
+      if (!left.valid() || left.type != "boolean" ||
+          (expected == 2 && (!right.valid() || right.type != "boolean")))
+        return {};
+      return make_logical_expression(
+          semantic == S::DS_LOGICAL_NOT ? "not" :
+          semantic == S::DS_LOGICAL_OR ? "or" : "and", left, right);
+    }
+    if (semantic == S::DS_CONV_CONSTRUCTOR && mdl_name &&
+        (std::string(mdl_name) == "float3(color)" ||
+         std::string(mdl_name) == "color(float3)")) {
+      mi::base::Handle<const mdl::IExpression_list> args(expression->get_arguments());
+      mi::base::Handle<const mdl::IExpression> input(
+          args && args->get_size() == 1 ? args->get_expression(mi::Size(0))
+                                        : nullptr);
+      MxExpression value = translate(input.get());
+      if (!value.valid())
+        return {};
+      const std::string type =
+          std::string(mdl_name) == "float3(color)" ? "vector3" : "color3";
+      mx::NodePtr convert = graph_->addNode("convert", next_name("convert"), type);
+      convert->setNodeDefString("ND_convert_" + value.type + "_" + type);
+      add_node_inputs_from_definition(convert);
+      if (!convert->getInput("in") ||
+          !connect_expression(value, convert->getInput("in"), report_, material_,
+                              "color/vector conversion"))
+        return {};
+      ++report_.translated_nodes;
+      return {convert, {}, type};
+    }
+    if (semantic == S::DS_NEGATIVE) {
+      mi::base::Handle<const mdl::IExpression_list> args(expression->get_arguments());
+      mi::base::Handle<const mdl::IExpression> input(
+          args && args->get_size() == 1 ? args->get_expression(mi::Size(0))
+                                        : nullptr);
+      MxExpression value = translate(input.get());
+      if (!value.valid() || value.type != "float") {
+        report_.warn(material_ + ": unsupported MDL unary negation.");
+        return {};
+      }
+      MxExpression zero = make_constant_expression("float", "0.0", "negative_zero");
+      return make_binary_expression("subtract", "float", zero, value, "negative");
+    }
+    if (semantic == S::DS_GREATER || semantic == S::DS_LESS ||
+        semantic == S::DS_GREATER_OR_EQUAL ||
+        semantic == S::DS_LESS_OR_EQUAL || semantic == S::DS_EQUAL) {
+      mi::base::Handle<const mdl::IExpression_list> args(
+          expression->get_arguments());
+      if (!args || args->get_size() != 2)
+        return {};
+      const bool reverse =
+          semantic == S::DS_LESS || semantic == S::DS_LESS_OR_EQUAL;
+      mi::base::Handle<const mdl::IExpression> left(
+          args->get_expression(reverse ? 1 : 0));
+      mi::base::Handle<const mdl::IExpression> right(
+          args->get_expression(reverse ? 0 : 1));
+      MxExpression lhs = translate(left.get());
+      MxExpression rhs = translate(right.get());
+      if (!lhs.valid() || !rhs.valid() || lhs.type != rhs.type ||
+          (lhs.type != "float" && lhs.type != "integer" &&
+           !(semantic == S::DS_EQUAL && lhs.type == "boolean"))) {
+        report_.warn(material_ + ": MDL comparison could not be represented.");
+        return {};
+      }
+      const std::string category =
+          semantic == S::DS_EQUAL ? "ifequal"
+          : semantic == S::DS_GREATER_OR_EQUAL || semantic == S::DS_LESS_OR_EQUAL
+              ? "ifgreatereq"
+              : "ifgreater";
+      const std::string suffix =
+          lhs.type == "integer" ? "I" : lhs.type == "boolean" ? "B" : "";
+      mx::NodePtr node = graph_->addNode(category, next_name("comparison"),
+                                         "boolean");
+      node->setNodeDefString("ND_" + category + "_boolean" + suffix);
+      add_node_inputs_from_definition(node);
+      if (!connect_expression(lhs, node->getInput("value1"), report_, material_,
+                              "comparison") ||
+          !connect_expression(rhs, node->getInput("value2"), report_, material_,
+                              "comparison"))
+        return {};
+      ++report_.translated_nodes;
+      return {node, {}, "boolean"};
+    }
     if (semantic == mdl::IFunction_definition::DS_INTRINSIC_DF_TINT)
       return translate_tint(expression);
     if (semantic == mdl::IFunction_definition::DS_INTRINSIC_MATH_LERP) {
@@ -1883,7 +2911,9 @@ private:
       category = "normal";
       state_normal = true;
     } else if (semantic ==
-               mdl::IFunction_definition::DS_ELEM_CONSTRUCTOR) {
+                   mdl::IFunction_definition::DS_ELEM_CONSTRUCTOR ||
+               (semantic == mdl::IFunction_definition::DS_CONV_CONSTRUCTOR &&
+                mdl_name && std::string(mdl_name) == "color(float)")) {
       mi::base::Handle<const mdl::IType> type(expression->get_type());
       const std::string type_name = mdl_type_to_materialx(type.get());
       if (type_name == "color3" || type_name == "vector3")
@@ -1932,6 +2962,18 @@ private:
                                        output_type);
     if (color_average)
       node->setNodeDefString("ND_dotproduct_vector3");
+    if (semantic == mdl::IFunction_definition::DS_INTRINSIC_MATH_DOT) {
+      mi::base::Handle<const mdl::IExpression_list> args(expression->get_arguments());
+      mi::base::Handle<const mdl::IExpression> first(
+          args && args->get_size() ? args->get_expression(mi::Size(0)) : nullptr);
+      mi::base::Handle<const mdl::IType> type(first ? first->get_type() : nullptr);
+      const std::string input_type = mdl_type_to_materialx(type.get());
+      if (input_type != "vector2" && input_type != "vector3" && input_type != "vector4") {
+        report_.warn(material_ + ": unsupported math::dot input type.");
+        return {};
+      }
+      node->setNodeDefString("ND_dotproduct_" + input_type);
+    }
     add_node_inputs_from_definition(node);
     if (state_normal)
       node->getInput("space")->setValueString("world");
@@ -1970,7 +3012,7 @@ private:
         report_.warn(material_ +
                      ": an MDL vector/color constructor has an unsupported "
                      "number of components.");
-        return {node, {}, output_type};
+        return {};
       }
       for (mi::Size index = 0; index < targets.size(); ++index) {
         const mi::Size argument_index =
@@ -1978,9 +3020,10 @@ private:
         mi::base::Handle<const mdl::IExpression> argument(
             arguments->get_expression(argument_index));
         MxExpression value = translate(argument.get());
-        if (value.valid())
-          connect_expression(value, targets[index], report_, material_,
-                             "vector/color constructor component");
+        if (!value.valid() ||
+            !connect_expression(value, targets[index], report_, material_,
+                                "vector/color constructor component"))
+          return {};
       }
       return {node, {}, output_type};
     }
@@ -1999,13 +3042,20 @@ private:
                      (argument_name ? argument_name : "<unnamed>") +
                      " from " + (mdl_name ? mdl_name : definition_name) +
                      " because there is no corresponding MaterialX input.");
+        if (!diffuse_approximation && !diffuse_emission)
+          return {};
         continue;
       }
       MxExpression value = translate(argument.get());
-      if (!value.valid())
+      if (!value.valid()) {
+        if (!diffuse_approximation && !diffuse_emission)
+          return {};
         continue;
-      connect_expression(value, target, report_, material_,
-                         argument_name ? argument_name : "MDL argument");
+      }
+      if (!connect_expression(value, target, report_, material_,
+                              argument_name ? argument_name : "MDL argument") &&
+          !diffuse_approximation && !diffuse_emission)
+        return {};
     }
     return {node, {}, output_type};
   }
@@ -2395,7 +3445,12 @@ void add_material(mx::DocumentPtr document,
       !is_state_normal_expression(normal_expression.get(), compiled.get(),
                                   transaction)) {
     MxExpression normal = translator.translate(normal_expression.get());
-    if (normal.valid() && normal.type == "vector3") {
+    if (normal.valid() && normal.type == "vector3" && normal.node &&
+        normal.node->getCategory() == "normal") {
+      report.warn(name +
+                  ": geometry.normal reduced to the unmodified normal; "
+                  "the translated layer normal is retained.");
+    } else if (normal.valid() && normal.type == "vector3") {
       connect_expression(normal, surface->getInput("normal"), report, name,
                          "geometry.normal");
     } else {

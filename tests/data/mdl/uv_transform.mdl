@@ -1,0 +1,33 @@
+mdl 1.7;
+
+import ::base::*;
+import ::df::*;
+import ::math::*;
+import ::tex::*;
+
+export material uv_transform(
+    float scale_u = 2.0,
+    float scale_v = 3.0,
+    float offset_u = 0.2,
+    float offset_v = 0.1,
+    float angle = 0.4
+) = let {
+    float4x4 scale_translate = float4x4(
+        scale_u, 0.0, 0.0, 0.0,
+        0.0, scale_v, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        offset_u, offset_v, 0.0, 1.0
+    );
+    float4x4 rotation = float4x4(
+        math::cos(angle), math::sin(angle), 0.0, 0.0,
+        -math::sin(angle), math::cos(angle), 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0
+    );
+    color sample = base::file_texture(
+        texture_2d("textures/checker.png", tex::gamma_linear),
+        uvw: base::transform_coordinate(scale_translate * rotation, base::coordinate_source())
+    ).tint;
+} in material(surface: material_surface(
+    scattering: df::diffuse_reflection_bsdf(tint: sample)
+));

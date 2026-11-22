@@ -1,0 +1,29 @@
+mdl 1.7;
+
+import ::df::*;
+
+export material metallic_diffuse_layer(
+    float dirt = 0.2,
+    color reflection = color(0.8, 0.85, 0.9),
+    color metal_weight = color(0.7, 0.8, 0.9),
+    float roughness = 0.2
+) = let {
+    bsdf metal = df::color_custom_curve_layer(
+        normal_reflectivity: reflection,
+        grazing_reflectivity: color(1.0),
+        weight: metal_weight,
+        layer: df::microfacet_ggx_smith_bsdf(
+            roughness_u: roughness,
+            roughness_v: roughness,
+            mode: df::scatter_reflect
+        )
+    );
+} in material(
+    surface: material_surface(
+        scattering: df::weighted_layer(
+            weight: dirt,
+            layer: df::diffuse_reflection_bsdf(tint: color(0.1, 0.04, 0.02)),
+            base: metal
+        )
+    )
+);

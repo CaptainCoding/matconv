@@ -1,0 +1,29 @@
+mdl 1.7;
+
+import ::base::*;
+import ::df::*;
+import ::tex::*;
+
+export material normal_geometry(
+    uniform float strength = 0.6,
+    uniform bool flip_u = true
+) = let {
+    float4x4 rotation = float4x4(
+        0.0, 1.0, 0.0, 0.0,
+        -1.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0
+    );
+} in material(
+    surface: material_surface(
+        scattering: df::diffuse_reflection_bsdf(tint: color(0.6, 0.4, 0.2))
+    ),
+    geometry: material_geometry(
+        normal: base::tangent_space_normal_texture(
+            texture_2d("textures/checker.png", tex::gamma_linear),
+            factor: strength,
+            flip_tangent_u: flip_u,
+            uvw: base::transform_coordinate(rotation, base::coordinate_source())
+        )
+    )
+);

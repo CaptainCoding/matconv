@@ -1,0 +1,25 @@
+mdl 1.7;
+
+import ::base::*;
+import ::df::*;
+import ::tex::*;
+
+export material normal_layer(
+    uniform float strength = 0.6
+) = material(
+    surface: material_surface(
+        scattering: df::weighted_layer(
+            weight: 0.7,
+            layer: df::microfacet_ggx_smith_bsdf(
+                roughness_u: 0.1,
+                roughness_v: 0.1
+            ),
+            base: df::diffuse_reflection_bsdf(tint: color(0.3)),
+            normal: base::tangent_space_normal_texture(
+                texture_2d("textures/checker.png", tex::gamma_linear),
+                factor: strength,
+                uvw: base::coordinate_source()
+            )
+        )
+    )
+);

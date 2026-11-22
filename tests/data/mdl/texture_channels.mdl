@@ -1,0 +1,25 @@
+mdl 1.7;
+
+import ::base::*;
+import ::df::*;
+import ::tex::*;
+
+export material texture_channels(
+    bool use_red = false,
+    float adjustment = 0.1
+) = let {
+    color sample = base::file_texture(
+        texture_2d("textures/checker.png", tex::gamma_linear),
+        mono_source: base::mono_average
+    ).tint;
+    float3 channels = float3(sample);
+    float selected = use_red ? channels[0] : channels[1];
+} in material(
+    surface: material_surface(
+        scattering: df::microfacet_ggx_smith_bsdf(
+            roughness_u: selected + (-adjustment),
+            roughness_v: selected + (-adjustment),
+            mode: df::scatter_reflect
+        )
+    )
+);

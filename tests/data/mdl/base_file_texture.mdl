@@ -1,0 +1,23 @@
+mdl 1.7;
+
+import ::base::*;
+import ::df::*;
+import ::tex::*;
+
+export material base_file_texture(
+    float brightness = 0.6
+) = let {
+    base::texture_return sample = base::file_texture(
+        texture: texture_2d("textures/checker.png", tex::gamma_srgb),
+        color_offset: color(0.03, 0.01, 0.02),
+        color_scale: color(brightness),
+        mono_source: base::mono_average
+    );
+} in material(
+    surface: material_surface(
+        scattering: df::diffuse_reflection_bsdf(
+            tint: sample.tint,
+            roughness: sample.mono
+        )
+    )
+);

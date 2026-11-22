@@ -1,0 +1,26 @@
+mdl 1.7;
+
+import ::base::*;
+import ::df::*;
+
+export material conditional_bsdf(
+    uniform bool glass = false,
+    uniform float amount = 0.25,
+    uniform float ior = 1.6,
+    uniform float abbe = 0.0
+) = material(
+    surface: material_surface(
+        scattering: glass
+            ? df::microfacet_ggx_smith_bsdf(
+                roughness_u: 0.0,
+                roughness_v: 0.0,
+                mode: df::scatter_reflect_transmit)
+            : amount > 0.5
+                ? df::diffuse_reflection_bsdf(tint: color(1.0, 0.0, 0.0))
+                : df::diffuse_reflection_bsdf(tint: color(0.0, 0.0, 1.0))
+    ),
+    ior: base::abbe_number_ior(ior, abbe)
+);
+
+export material conditional_bsdf_red() = conditional_bsdf(amount: 0.75);
+export material conditional_bsdf_glass() = conditional_bsdf(glass: true);

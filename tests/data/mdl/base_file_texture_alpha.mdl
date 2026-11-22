@@ -1,0 +1,16 @@
+mdl 1.7;
+
+import ::base::*;
+import ::df::*;
+import ::tex::*;
+
+export material base_file_texture_alpha() = material(
+    surface: material_surface(
+        scattering: df::diffuse_reflection_bsdf(
+            roughness: base::file_texture(
+                texture: texture_2d("textures/checker.png", tex::gamma_linear),
+                mono_source: base::mono_alpha
+            ).mono
+        )
+    )
+);

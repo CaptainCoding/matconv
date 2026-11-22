@@ -1,0 +1,29 @@
+mdl 1.7;
+
+import ::base::*;
+import ::df::*;
+import ::math::*;
+
+export material color_layers(
+    color background = color(0.1, 0.3, 0.5),
+    color foreground = color(0.8, 0.2, 0.1),
+    float weight = 0.9,
+    bool first = true,
+    bool second = false
+) = let {
+    float remainder = math::fmod(-weight, 0.7);
+    bool condition = first ? (first || second) : (!first && second);
+    color result = base::blend_color_layers(
+        layers: base::color_layer[](
+            base::color_layer(foreground, weight, base::color_layer_blend),
+            base::color_layer(color(0.1), -remainder, base::color_layer_add)
+        ),
+        base: background
+    ).tint;
+} in material(
+    surface: material_surface(
+        scattering: df::diffuse_reflection_bsdf(
+            tint: condition ? result : background
+        )
+    )
+);
