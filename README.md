@@ -31,5 +31,4 @@ build/mdl-with-image-plugin/matconv mtlx-to-mdl \
 output. Generated MDL requires MaterialX MDL support modules on the consuming
 runtime's search path.
 
-See the [demos](demo/) for examples. Check asset licenses before converting or
-redistributing materials.
+Check asset licenses before converting or redistributing materials.
