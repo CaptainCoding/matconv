@@ -1,0 +1,21 @@
+mdl 1.7;
+
+import ::df::*;
+
+export material weighted_thin_film(float weight = 0.0) = material(
+    surface: material_surface(
+        scattering: df::weighted_layer(
+            weight: weight,
+            base: df::diffuse_reflection_bsdf(tint: color(0.8, 0.0, 0.0)),
+            layer: df::thin_film(
+                thickness: 420.0,
+                ior: color(1.33),
+                base: df::microfacet_ggx_smith_bsdf(
+                    roughness_u: 0.15,
+                    tint: color(0.0, 0.8, 0.0),
+                    mode: df::scatter_reflect
+                )
+            )
+        )
+    )
+);

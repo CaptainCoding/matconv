@@ -1,0 +1,26 @@
+mdl 1.7;
+
+import ::df::*;
+
+export material simple_glossy_glass(
+    float reflection_roughness = 0.08,
+    float transmission_roughness = 0.02,
+    color tint = color(0.92, 0.96, 1.0),
+    uniform float ior = 1.5
+) = material(
+    surface: material_surface(
+        scattering: df::fresnel_layer(
+            ior: ior,
+            layer: df::simple_glossy_bsdf(
+                roughness_u: reflection_roughness,
+                mode: df::scatter_reflect
+            ),
+            base: df::simple_glossy_bsdf(
+                roughness_u: transmission_roughness,
+                tint: tint,
+                mode: df::scatter_transmit
+            )
+        )
+    ),
+    ior: color(ior)
+);

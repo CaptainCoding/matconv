@@ -1,6 +1,13 @@
 set(cases
     "diffuse_matte|<standard_surface"
     "ggx_reflect|<standard_surface"
+    "ggx_anisotropic|<standard_surface"
+    "ggx_anisotropic_swapped|<standard_surface"
+    "ggx_anisotropic_zero|<standard_surface"
+    "ggx_anisotropic_conductor|<standard_surface"
+    "ggx_layer_isotropic|<standard_surface"
+    "ggx_layer_anisotropic|<standard_surface"
+    "colored_ggx_layers|<standard_surface"
     "ggx_transmit|<standard_surface"
     "ggx_transmit_rough|<standard_surface"
     "ggx_glass_smooth|<standard_surface"
@@ -9,9 +16,19 @@ set(cases
     "conditional_bsdf|<ifequal "
     "specular_coat|<standard_surface"
     "fresnel_glass|<standard_surface"
+    "simple_glossy_glass|<standard_surface"
+    "simple_glossy_reflect|<standard_surface"
+    "separate_tint_glass|<standard_surface"
     "curve_reflection|<standard_surface"
     "curve_film_zero|<standard_surface"
     "weighted_layer|<standard_surface"
+    "weighted_thin_film|<standard_surface"
+    "weighted_conductor|<standard_surface"
+    "weighted_nested|<standard_surface"
+    "parameterized_scatter_mode|<standard_surface"
+    "parameterized_scatter_both|<standard_surface"
+    "directional_glass|<standard_surface"
+    "measured_curve_glass|<standard_surface"
     "custom_curve_layer|<standard_surface"
     "thin_film|<standard_surface"
     "emission|<standard_surface"
@@ -24,6 +41,10 @@ set(cases
     "texture_channels|<extract "
     "metallic_diffuse_layer|<mix name=\"metal_diffuse_mix_"
     "color_layers|<mix name=\"color_layer_"
+    "perlin_texture|<noise3d "
+    "perlin_unsupported|<standard_surface"
+    "radians_vector|<multiply name=\"radians_"
+    "sheen_fabric|<standard_surface"
     "unsupported_color_layer|<standard_surface"
     "uv_transform|<combine3 name=\"transformed_uv_"
     "normal_layer|<normalmap "
@@ -90,6 +111,60 @@ foreach(case IN LISTS cases)
             endif()
         endforeach()
     endif()
+    if(material MATCHES "^ggx_anisotropic")
+        foreach(fragment IN ITEMS
+                "interfacename=\"roughness_u\""
+                "interfacename=\"roughness_v\""
+                "<input name=\"specular_anisotropy\" type=\"float\" nodename=\"anisotropy_nonzero_"
+                "<input name=\"specular_rotation\" type=\"float\" nodename=\"anisotropy_rotation_"
+                "<input name=\"tangent\" type=\"vector3\" nodename=\"texture_tangent_"
+                "<divide name=\"anisotropy_ratio_"
+                "<ifgreater name=\"anisotropy_safe_major_")
+            string(FIND "${generated}" "${fragment}" found)
+            if(found EQUAL -1)
+                message(FATAL_ERROR "${material} does not preserve '${fragment}'.")
+            endif()
+        endforeach()
+    endif()
+    if(material STREQUAL "colored_ggx_layers" OR material STREQUAL "ggx_layer_isotropic")
+        foreach(fragment IN ITEMS
+                "<input name=\"specular_anisotropy\" type=\"float\" nodename=\"ggx_layer_anisotropy_"
+                "<input name=\"coat\" type=\"float\""
+                "<input name=\"coat_roughness\" type=\"float\" nodename=\"roughness_sqrt_"
+                "<input name=\"coat_anisotropy\" type=\"float\" value=\"0.0\""
+                "<mix name=\"ggx_layer_roughness_"
+                "<mix name=\"ggx_layer_anisotropy_")
+            string(FIND "${generated}" "${fragment}" found)
+            if(found EQUAL -1)
+                message(FATAL_ERROR "${material} does not preserve '${fragment}'.")
+            endif()
+        endforeach()
+    endif()
+    if(material STREQUAL "colored_ggx_layers")
+        foreach(fragment IN ITEMS
+                "<input name=\"base_color\" type=\"color3\" nodename=\"ggx_layer_color_"
+                "<multiply name=\"metal_curve_weight_"
+                "interfacename=\"reflectance\""
+                "interfacename=\"curve_weight\"")
+            string(FIND "${generated}" "${fragment}" found)
+            if(found EQUAL -1)
+                message(FATAL_ERROR "${material} does not preserve '${fragment}'.")
+            endif()
+        endforeach()
+    endif()
+    if(material STREQUAL "ggx_layer_anisotropic")
+        foreach(fragment IN ITEMS
+                "<input name=\"tangent\" type=\"vector3\" nodename=\"ggx_layer_tangent_"
+                "<input name=\"specular_rotation\" type=\"float\" nodename=\"ggx_layer_rotation_"
+                "<ifgreater name=\"ggx_layer_upper_tangent_"
+                "<ifgreater name=\"ggx_layer_upper_rotation_"
+                "interfacename=\"weight\"")
+            string(FIND "${generated}" "${fragment}" found)
+            if(found EQUAL -1)
+                message(FATAL_ERROR "${material} does not preserve '${fragment}'.")
+            endif()
+        endforeach()
+    endif()
     if(material STREQUAL "base_file_texture")
         foreach(fragment IN ITEMS
                 "<input name=\"base_color\" type=\"color3\" nodename=\"file_texture_offset_"
@@ -131,7 +206,7 @@ foreach(case IN LISTS cases)
     endif()
     if(material STREQUAL "unsupported_uv")
         if(NOT "${stdout}${stderr}" MATCHES "MaterialX's default UV0 is used")
-            message(FATAL_ERROR "Unsupported object-space UV was not reported.")
+            message(FATAL_ERROR "Unsupported spherical projection was not reported.")
         endif()
     endif()
     if(material STREQUAL "uv_transform")
@@ -184,7 +259,10 @@ foreach(case IN LISTS cases)
     endif()
     if(material STREQUAL "color_layers")
         foreach(fragment IN ITEMS "<mix name=\"color_layer_"
-                "<add name=\"color_layer_add_" "<subtract name=\"fmod_"
+                "<add name=\"color_layer_add_" "<multiply name=\"color_layer_multiply_"
+                "<overlay name=\"color_layer_overlay_"
+                "<input name=\"fg\" type=\"color3\" nodename=\"color_layer_multiply_"
+                "<subtract name=\"fmod_"
                 "ND_logical_or" "ND_logical_and" "ND_logical_not")
             string(FIND "${generated}" "${fragment}" found)
             if(found EQUAL -1)
@@ -197,12 +275,63 @@ foreach(case IN LISTS cases)
     endif()
     if(material STREQUAL "unsupported_color_layer")
         if(NOT "${stdout}${stderr}" MATCHES
-                "unsupported blend_color_layers mode color_layer_multiply")
+                "unsupported blend_color_layers mode color_layer_hue")
             message(FATAL_ERROR "Unsupported color-layer mode was not reported.")
         endif()
         if("${generated}" MATCHES
                 "<input name=\"base_color\" type=\"color3\" nodename=\"power_")
             message(FATAL_ERROR "Unsupported layer was replaced by a power-node default.")
+        endif()
+    endif()
+    if(material STREQUAL "perlin_texture")
+        foreach(fragment IN ITEMS
+                "<position name=\"texture_position_"
+                "value=\"object\""
+                "<noise3d name=\"perlin_noise_"
+                "<absval name=\"noise_abs_"
+                "<mix name=\"perlin_color_"
+                "interfacename=\"color1\""
+                "interfacename=\"color2\""
+                "interfacename=\"low\""
+                "interfacename=\"high\"")
+            string(FIND "${generated}" "${fragment}" found)
+            if(found EQUAL -1)
+                message(FATAL_ERROR "${material} does not preserve '${fragment}'.")
+            endif()
+        endforeach()
+        if(NOT "${stdout}${stderr}" MATCHES "pattern differs from MDL's 4D noise")
+            message(FATAL_ERROR "${material} did not report the noise approximation.")
+        endif()
+    endif()
+    if(material STREQUAL "perlin_unsupported")
+        if(NOT "${stdout}${stderr}" MATCHES "unsupported dynamic or modified noise parameters")
+            message(FATAL_ERROR "${material} did not report unsupported noise phase.")
+        endif()
+        if("${generated}" MATCHES "<noise3d ")
+            message(FATAL_ERROR "${material} silently ignored unsupported noise phase.")
+        endif()
+    endif()
+    if(material STREQUAL "radians_vector")
+        foreach(fragment IN ITEMS "interfacename=\"angle\"" "0.017453292519943295")
+            string(FIND "${generated}" "${fragment}" found)
+            if(found EQUAL -1)
+                message(FATAL_ERROR "${material} does not preserve '${fragment}'.")
+            endif()
+        endforeach()
+    endif()
+    if(material STREQUAL "sheen_fabric")
+        foreach(fragment IN ITEMS
+                "<input name=\"sheen\" type=\"float\" value=\"1.0\""
+                "<input name=\"sheen_color\" type=\"color3\" interfacename=\"sheen_color\""
+                "<input name=\"sheen_roughness\" type=\"float\" interfacename=\"roughness\""
+                "<input name=\"base_color\" type=\"color3\" interfacename=\"base_color\"")
+            string(FIND "${generated}" "${fragment}" found)
+            if(found EQUAL -1)
+                message(FATAL_ERROR "${material} does not preserve '${fragment}'.")
+            endif()
+        endforeach()
+        if("${stdout}${stderr}" MATCHES "unsupported BSDF")
+            message(FATAL_ERROR "${material} fell back to diffuse.")
         endif()
     endif()
     if(material STREQUAL "ggx_transmit")
@@ -272,6 +401,57 @@ foreach(case IN LISTS cases)
         endforeach()
         if("${stdout}${stderr}" MATCHES "unsupported BSDF")
             message(FATAL_ERROR "fresnel_glass fell back to diffuse.")
+        endif()
+    endif()
+    if(material STREQUAL "simple_glossy_glass")
+        foreach(fragment IN ITEMS
+                "<input name=\"transmission\" type=\"float\" value=\"1.0\""
+                "<input name=\"transmission_color\" type=\"color3\" interfacename=\"tint\""
+                "<input name=\"transmission_extra_roughness\" type=\"float\" nodename=\"transmission_roughness_offset_"
+                "<subtract name=\"transmission_roughness_offset_"
+                "interfacename=\"reflection_roughness\""
+                "interfacename=\"transmission_roughness\"")
+            string(FIND "${generated}" "${fragment}" found)
+            if(found EQUAL -1)
+                message(FATAL_ERROR "${material} does not preserve '${fragment}'.")
+            endif()
+        endforeach()
+        if(NOT "${stdout}${stderr}" MATCHES "simple_glossy was approximated.*Phong")
+            message(FATAL_ERROR "${material} did not report the Phong-to-GGX approximation.")
+        endif()
+        if("${stdout}${stderr}" MATCHES "unsupported BSDF|surface.scattering could not be translated")
+            message(FATAL_ERROR "${material} fell back to diffuse.")
+        endif()
+    endif()
+    if(material STREQUAL "simple_glossy_reflect")
+        foreach(fragment IN ITEMS
+                "<input name=\"metalness\" type=\"float\" value=\"1.0\""
+                "<input name=\"specular_anisotropy\" type=\"float\" nodename=\"anisotropy_nonzero_"
+                "<input name=\"tangent\" type=\"vector3\" nodename=\"texture_tangent_"
+                "interfacename=\"roughness_u\""
+                "interfacename=\"roughness_v\"")
+            string(FIND "${generated}" "${fragment}" found)
+            if(found EQUAL -1)
+                message(FATAL_ERROR "${material} does not preserve '${fragment}'.")
+            endif()
+        endforeach()
+    endif()
+    if(material STREQUAL "separate_tint_glass")
+        foreach(fragment IN ITEMS
+                "<input name=\"transmission\" type=\"float\" value=\"1.0\""
+                "<input name=\"specular_color\" type=\"color3\" nodename=\"microfacet_tint_"
+                "<input name=\"transmission_color\" type=\"color3\" nodename=\"microfacet_transmission_tint_"
+                "<multiply name=\"microfacet_tint_"
+                "<multiply name=\"microfacet_transmission_tint_"
+                "interfacename=\"reflection\""
+                "interfacename=\"transmission\"")
+            string(FIND "${generated}" "${fragment}" found)
+            if(found EQUAL -1)
+                message(FATAL_ERROR "${material} does not preserve '${fragment}'.")
+            endif()
+        endforeach()
+        if("${stdout}${stderr}" MATCHES "surface.scattering could not be translated")
+            message(FATAL_ERROR "${material} fell back to diffuse.")
         endif()
     endif()
     if(material STREQUAL "ggx_reflect" OR
@@ -369,6 +549,57 @@ foreach(case IN LISTS cases)
                 message(FATAL_ERROR
                     "thin_film output does not preserve '${fragment}'.")
             endif()
+            if(material MATCHES "^weighted_(thin_film|conductor|nested)$")
+                foreach(fragment IN ITEMS
+                        "<input name=\"base_color\" type=\"color3\" nodename=\"weighted_subtree_"
+                        "<input name=\"mix\" type=\"float\" interfacename=\"weight\""
+                        "weighted BSDF subtree was approximated")
+                    string(FIND "${generated}${stdout}${stderr}" "${fragment}" found)
+                    if(found EQUAL -1)
+                        message(FATAL_ERROR "${material} does not preserve '${fragment}'.")
+                    endif()
+                endforeach()
+            endif()
+            if(material STREQUAL "weighted_thin_film")
+                string(REGEX MATCH
+                    "<input name=\"base_color\" type=\"color3\" nodename=\"([^\"]+)\""
+                    color_input "${generated}")
+                set(color_mix "${CMAKE_MATCH_1}")
+                string(REGEX MATCH
+                    "<mix name=\"${color_mix}\" type=\"color3\"[^>]*>[^<]*<input name=\"fg\" type=\"color3\" nodename=\"([^\"]+)\"[^>]*/>[^<]*<input name=\"bg\" type=\"color3\" nodename=\"([^\"]+)\"[^>]*/>[^<]*<input name=\"mix\" type=\"float\" interfacename=\"weight\""
+                    color_graph "${generated}")
+                set(foreground "${CMAKE_MATCH_1}")
+                set(background "${CMAKE_MATCH_2}")
+                string(FIND "${generated}"
+                    "<constant name=\"${foreground}\" type=\"color3\">\n      <input name=\"value\" type=\"color3\" value=\"0, 0.800000012, 0\""
+                    green_found)
+                string(FIND "${generated}"
+                    "<constant name=\"${background}\" type=\"color3\">\n      <input name=\"value\" type=\"color3\" value=\"0.800000012, 0, 0\""
+                    red_found)
+                if(NOT color_input OR NOT color_graph OR green_found EQUAL -1 OR red_found EQUAL -1)
+                    message(FATAL_ERROR "weighted_thin_film does not preserve the weight 0 and 1 colors.")
+                endif()
+            endif()
+            if(material MATCHES "^parameterized_scatter_(mode|both)$")
+                if(NOT "${generated}" MATCHES "<input name=\"transmission\" type=\"float\" value=\"1.0\"")
+                    message(FATAL_ERROR "${material} lost the default transmission mode.")
+                endif()
+                if(material STREQUAL "parameterized_scatter_both" AND
+                   NOT "${generated}" MATCHES "<input name=\"specular\" type=\"float\" value=\"1.0\"")
+                    message(FATAL_ERROR "${material} lost the default reflection mode.")
+                endif()
+                if(NOT "${stdout}${stderr}" MATCHES "enum parameter mode is fixed to its default")
+                    message(FATAL_ERROR "${material} did not report the fixed enum parameter.")
+                endif()
+            endif()
+            if(material STREQUAL "directional_glass" OR material STREQUAL "measured_curve_glass")
+                if(NOT "${generated}" MATCHES "<input name=\"transmission\" type=\"float\" value=\"1.0\"")
+                    message(FATAL_ERROR "${material} lost its underlying transmissive BSDF.")
+                endif()
+                if(NOT "${stdout}${stderr}" MATCHES "underlying BSDF is approximated")
+                    message(FATAL_ERROR "${material} did not report its omitted factor.")
+                endif()
+            endif()
         endforeach()
     endif()
     if(material STREQUAL "emission")
@@ -428,7 +659,16 @@ foreach(case IN LISTS cases)
        material STREQUAL "uv_transform" OR
        material STREQUAL "normal_layer" OR
        material STREQUAL "normal_layer_uv" OR
-       material STREQUAL "normal_geometry")
+       material STREQUAL "normal_geometry" OR
+       material STREQUAL "colored_ggx_layers" OR
+       material STREQUAL "ggx_layer_anisotropic" OR
+       material STREQUAL "ggx_layer_isotropic" OR
+       material MATCHES "^weighted_(thin_film|conductor|nested)$" OR
+       material STREQUAL "parameterized_scatter_mode" OR
+       material STREQUAL "parameterized_scatter_both" OR
+       material STREQUAL "directional_glass" OR
+       material STREQUAL "measured_curve_glass" OR
+       material MATCHES "^ggx_anisotropic")
         execute_process(
             COMMAND "${MATCONV_EXECUTABLE}" mdl-to-mtlx
                 --input "${roundtrip_output}"
@@ -470,3 +710,64 @@ foreach(case IN LISTS cases)
         endif()
     endif()
 endforeach()
+
+set(root_output "${OUTPUT_DIR}/root-image-output")
+file(MAKE_DIRECTORY "${root_output}")
+execute_process(
+    COMMAND "${MATCONV_EXECUTABLE}" mtlx-to-mdl
+        --input "${MDL_CASES_DIR}/../root_image.mtlx"
+        --output "${root_output}/root_image.mdl"
+        --material root_material
+    RESULT_VARIABLE root_result
+    OUTPUT_VARIABLE root_stdout
+    ERROR_VARIABLE root_stderr
+)
+if(NOT root_result EQUAL 0)
+    message(FATAL_ERROR "Root-level texture conversion failed:\n${root_stdout}${root_stderr}")
+endif()
+file(READ "${root_output}/root_image.mdl" root_mdl)
+if(NOT root_mdl MATCHES "\\./textures/checker\\.png" OR
+   NOT EXISTS "${root_output}/textures/checker.png")
+    message(FATAL_ERROR "Root-level image was not packaged and referenced.")
+endif()
+file(SHA256 "${MDL_CASES_DIR}/textures/checker.png" source_hash)
+file(SHA256 "${root_output}/textures/checker.png" packaged_hash)
+if(NOT source_hash STREQUAL packaged_hash)
+    message(FATAL_ERROR "Packaged root-level texture differs from its source.")
+endif()
+file(READ "${MDL_CASES_DIR}/../root_image.mtlx" missing_document)
+string(REPLACE "mdl/textures/checker.png" "missing-texture.png"
+    missing_document "${missing_document}")
+file(WRITE "${root_output}/missing.mtlx" "${missing_document}")
+execute_process(
+    COMMAND "${MATCONV_EXECUTABLE}" mtlx-to-mdl
+        --input "${root_output}/missing.mtlx"
+        --output "${root_output}/missing.mdl"
+        --material root_material
+    RESULT_VARIABLE missing_result
+    OUTPUT_VARIABLE missing_stdout
+    ERROR_VARIABLE missing_stderr
+)
+if(missing_result EQUAL 0 OR
+   NOT "${missing_stdout}${missing_stderr}" MATCHES "Could not resolve MaterialX texture resource")
+    message(FATAL_ERROR "Missing root-level texture was not reported.")
+endif()
+
+set(strict_output "${OUTPUT_DIR}/strict-rejected.mtlx")
+file(REMOVE "${strict_output}")
+execute_process(
+    COMMAND "${MATCONV_EXECUTABLE}" mdl-to-mtlx
+        --input "${MDL_CASES_DIR}/parameterized_scatter_mode.mdl"
+        --output "${strict_output}"
+        --material parameterized_scatter_mode
+        --mdl-path "${MDL_PATH}"
+        --strict
+    RESULT_VARIABLE strict_result
+    OUTPUT_VARIABLE strict_stdout
+    ERROR_VARIABLE strict_stderr
+)
+if(strict_result EQUAL 0 OR EXISTS "${strict_output}" OR
+   NOT "${strict_stdout}${strict_stderr}" MATCHES "Strict conversion rejected" OR
+   NOT "${strict_stdout}${strict_stderr}" MATCHES "enum parameter mode is fixed")
+    message(FATAL_ERROR "Strict mode did not reject and report the lossy conversion.")
+endif()

@@ -1,0 +1,23 @@
+mdl 1.7;
+
+import ::df::*;
+
+export material ggx_layer_isotropic(
+    float roughness_u = 0.3,
+    float roughness_v = 0.05,
+    float coat_roughness = 0.2
+) = material(
+    surface: material_surface(
+        scattering: df::weighted_layer(
+            weight: 0.5,
+            layer: df::microfacet_ggx_smith_bsdf(
+                roughness_u: coat_roughness,
+                roughness_v: coat_roughness
+            ),
+            base: df::microfacet_ggx_smith_bsdf(
+                roughness_u: roughness_u,
+                roughness_v: roughness_v
+            )
+        )
+    )
+);

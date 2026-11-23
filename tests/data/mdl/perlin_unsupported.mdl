@@ -1,0 +1,12 @@
+mdl 1.7;
+
+import ::base::*;
+import ::df::*;
+
+export material perlin_unsupported() = material(
+    surface: material_surface(
+        scattering: df::diffuse_reflection_bsdf(
+            tint: base::perlin_noise_texture(noise_phase: 1.0).tint
+        )
+    )
+);

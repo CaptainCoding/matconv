@@ -1,0 +1,20 @@
+mdl 1.7;
+
+import ::df::*;
+import ::state::*;
+
+export material ggx_anisotropic_swapped(
+    float roughness_u = 0.04,
+    float roughness_v = 0.36
+) = material(
+    surface: material_surface(
+        scattering: df::microfacet_ggx_smith_bsdf(
+            roughness_u: roughness_u,
+            roughness_v: roughness_v,
+            tangent_u: state::texture_tangent_u(0),
+            tint: color(0.8),
+            multiscatter_tint: color(0.0),
+            mode: df::scatter_reflect
+        )
+    )
+);

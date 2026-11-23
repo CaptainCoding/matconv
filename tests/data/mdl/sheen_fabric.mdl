@@ -1,0 +1,18 @@
+mdl 1.7;
+
+import ::df::*;
+
+export material sheen_fabric(
+    color base_color = color(0.18, 0.02, 0.04),
+    color sheen_color = color(0.6, 0.2, 0.3),
+    float roughness = 0.2
+) = material(
+    surface: material_surface(
+        scattering: df::sheen_bsdf(
+            roughness: roughness,
+            tint: sheen_color,
+            multiscatter_tint: color(1.0),
+            multiscatter: df::diffuse_reflection_bsdf(tint: base_color)
+        )
+    )
+);

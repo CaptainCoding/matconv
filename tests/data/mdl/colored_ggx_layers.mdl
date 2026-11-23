@@ -1,0 +1,34 @@
+mdl 1.7;
+
+import ::df::*;
+
+export material colored_ggx_layers(
+    color reflectance = color(0.55, 0.65, 0.75),
+    color curve_weight = color(0.8, 0.9, 1.0),
+    float base_u = 0.24,
+    float base_v = 0.04,
+    float layer_roughness = 0.4,
+    float layer_weight = 0.09
+) = material(
+    surface: material_surface(
+        scattering: df::color_custom_curve_layer(
+            normal_reflectivity: reflectance,
+            grazing_reflectivity: color(1.0),
+            weight: curve_weight,
+            layer: df::weighted_layer(
+                weight: layer_weight,
+                layer: df::microfacet_ggx_smith_bsdf(
+                    roughness_u: layer_roughness,
+                    multiscatter_tint: color(0.0),
+                    mode: df::scatter_reflect
+                ),
+                base: df::microfacet_ggx_smith_bsdf(
+                    roughness_u: base_u,
+                    roughness_v: base_v,
+                    multiscatter_tint: color(0.0),
+                    mode: df::scatter_reflect
+                )
+            )
+        )
+    )
+);

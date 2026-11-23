@@ -9,7 +9,9 @@ export material unsupported_uv() = material(
         scattering: df::diffuse_reflection_bsdf(
             tint: base::file_texture(
                 texture_2d("textures/checker.png", tex::gamma_linear),
-                uvw: base::coordinate_source(base::texture_coordinate_object)
+                uvw: base::coordinate_projection(
+                    projection_type: base::projection_spherical
+                )
             ).tint
         )
     )

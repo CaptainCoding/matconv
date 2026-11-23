@@ -1,0 +1,15 @@
+mdl 1.7;
+
+import ::df::*;
+
+export material parameterized_scatter_mode(
+    uniform df::scatter_mode mode = df::scatter_transmit
+) = material(
+    surface: material_surface(
+        scattering: df::microfacet_ggx_smith_bsdf(
+            roughness_u: 0.1,
+            mode: mode
+        )
+    ),
+    ior: color(1.5)
+);

@@ -14,6 +14,7 @@ struct Options {
   std::filesystem::path output;
   std::string material;
   std::vector<std::filesystem::path> mdl_paths;
+  bool strict = false;
 };
 
 int convert(const Options &options);

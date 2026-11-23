@@ -57,6 +57,10 @@ bool validate_options(const Options &options, bool has_input, bool has_output,
     error = "--mdl-path is only valid for mdl-to-mtlx.";
     return false;
   }
+  if (!mdl_input && options.strict) {
+    error = "--strict is only valid for mdl-to-mtlx.";
+    return false;
+  }
   return true;
 }
 
@@ -76,6 +80,7 @@ void print_help() {
          "MaterialX renderable.\n"
       << "  --mdl-path DIR        Add an MDL module/resource search path; "
          "repeatable.\n"
+      << "  --strict              Fail on conversion warnings (mdl-to-mtlx).\n"
       << "  -h, --help            Show this help.\n"
       << "  --version             Show the version.\n\n"
       << "Dependencies are fetched and built with:\n"
@@ -108,6 +113,10 @@ CommandLineResult parse_command_line(int argc, char *argv[]) {
   bool has_output = false;
   for (int index = 2; index < argc; ++index) {
     const std::string_view argument = argv[index];
+    if (argument == "--strict") {
+      options.strict = true;
+      continue;
+    }
     if (argument != "--input" && argument != "--output" &&
         argument != "--material" && argument != "--mdl-path") {
       return error_result("Unknown option: " + std::string(argument));

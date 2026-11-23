@@ -1,0 +1,17 @@
+mdl 1.7;
+
+import ::df::*;
+
+export material weighted_nested(float weight = 0.0, float inner_weight = 0.5) = material(
+    surface: material_surface(
+        scattering: df::weighted_layer(
+            weight: weight,
+            base: df::diffuse_reflection_bsdf(tint: color(0.8, 0.0, 0.0)),
+            layer: df::weighted_layer(
+                weight: inner_weight,
+                base: df::diffuse_reflection_bsdf(tint: color(0.0, 0.8, 0.0)),
+                layer: df::specular_bsdf(tint: color(0.8))
+            )
+        )
+    )
+);

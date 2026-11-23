@@ -19,14 +19,38 @@ and math operations, diffuse reflection, and diffuse emission, plus material
 opacity, thin-walled state, backface, and displacement slots.
 
 MDL surface BSDFs are approximated with a renderable `standard_surface`.
-GGX roughness is converted to the standard-surface convention; independent
-roughness in layered reflection and transmission cannot always be preserved.
-Standalone reflection-only GGX uses a metallic approximation because its MDL
-reflection mode does not apply dielectric Fresnel attenuation. The resulting
-grazing-angle reflectance can differ.
+GGX roughness is converted to the standard-surface convention. The two
+anisotropic roughness axes and tangent are mapped to its roughness, anisotropy,
+and rotation controls; extreme anisotropy and roughness outside its supported
+range are clamped. Reflection and transmission roughness are kept separate for supported
+reflective layers over transmissive bases, although anisotropy and other
+layered combinations still share standard-surface controls.
+MaterialX also provides composable BSDF nodes, including conductor, dielectric,
+generalized Schlick, mix, and layer nodes. These can retain more separate lobe
+parameters than a single `standard_surface`, but the converter does not yet
+emit them for surface scattering; their semantics and renderer support must
+be considered when mapping MDL mixtures and layers.
+MDL `simple_glossy_bsdf` uses a Phong distribution with V-cavities masking;
+it is approximated with GGX, so highlights and grazing angles can differ.
+Standalone reflection-only glossy BSDFs use a metallic approximation because
+their MDL reflection mode does not apply dielectric Fresnel attenuation. The resulting
+grazing-angle reflectance can differ. A weighted reflective GGX layer over a
+metallic GGX base is approximated using blended roughness, anisotropy and color
+plus a coat. The coat's Fresnel response differs from an MDL weighted layer,
+and both lobes share one tangent. This approximation cannot reproduce two
+independently weighted lobes exactly.
 Supported conditional BSDFs select between approximated surface inputs using
 their original conditions. Fresnel layers and specular coatings are
 approximations and can still differ visibly, especially for thin-walled glass.
+Weighted nested layers, conductors and thin-film subtrees blend their
+standard-surface inputs; this preserves the outer weight but is not a physical
+equivalent of general MDL layering. Enum parameters used for conversion are
+fixed to their MDL defaults and reported as warnings. Unsupported directional
+and measured-curve factors are omitted with a warning while their underlying
+BSDF is retained when it can be translated.
+Supported BSDF tint modifiers retain separate reflection and transmission colors.
+MDL sheen is approximated using the standard-surface sheen and its translated
+multiscatter base; the multiscatter tint and layer order can differ.
 The scalar IOR used for MDL Abbe dispersion does not reproduce dispersion.
 For MDL generation, the loaded standard-surface implementation is adjusted to
 forward its uniform `thin_walled` input to the surface constructor.
@@ -43,8 +67,9 @@ color scale, and offset; other mono modes are not yet translated. UV-space
 preserve their UV coordinates, including parameterized matrix products.
 Unsupported coordinate expressions fall back to UV0 with a warning.
 Tangent-space normal textures and transformed tangent frames are translated
-where supported. A BSDF layer normal is approximated using the shared
-standard-surface normal, so independently layered normals may differ.
+where supported. A BSDF layer normal is normally approximated using the shared
+standard-surface normal; a GGX layer mapped to a coat uses `coat_normal`.
+Other independently layered normals may differ.
 Object-space projections, other matrix expressions, mirrored normal-map
 wrapping, cropping, clipping, and animation can still differ.
 MDL gamma 2.2 images are tagged `g22_rec709`; MDL generation uses MaterialX
@@ -52,9 +77,27 @@ color management to convert tagged colors into linear Rec.709. Non-color image
 lookups may not receive the same gamma correction.
 Constant-component vector indexing, numeric and boolean conditionals, and
 scalar `math::fmod` are translated. `base::blend_color_layers` supports
-constructor arrays with blend and add modes; other modes are reported as
+constructor arrays with blend, add, multiply, and overlay modes; other modes are reported as
 unsupported. When only one conditional branch can be translated, it is used
 for both branches with a warning.
+Supported `base::perlin_noise_texture` color outputs use summed MaterialX 3D
+noise; MDL uses 4D noise, so the pattern differs. Nonzero phase, distortion,
+ridged/marble/dent modes, banding, dynamic octave counts or sizes, and the
+mono output are not supported. Object and world position coordinates are
+preserved when their transforms can be translated.
+
+## Converter structure
+
+The MDL-to-MaterialX entry point and material assembly live in
+[`mdl_to_materialx.cpp`](src/mdl_to_materialx.cpp). The expression translator
+separates [general expression translation](src/mdl_expression_translator.cpp),
+[BSDF approximations](src/mdl_bsdf_translation.cpp),
+[texture translation](src/mdl_texture_translation.cpp), and
+[shared graph and MDL helpers](src/mdl_translation_utils.cpp). The separate
+[native BSDF translation](src/mdl_native_bsdf_translation.cpp) is not the
+active surface-output strategy. These files share the translator state; this
+organization does not change the conversion strategy or its documented
+limitations.
 
 ## Build
 
@@ -114,6 +157,14 @@ SDK through these paths. Referenced local image files are copied to a
 `textures` directory beside the output file, and resource paths are rebased
 accordingly. Different files with the same name receive a suffix rather than
 overwriting one another.
+
+For `mdl-to-mtlx`, `--strict` rejects any conversion warning and does not
+write the MaterialX document. Texture resources may already have been copied
+while evaluating the material. This is a conservative warning policy, not a
+proof that a warning-free conversion is physically equivalent.
+The MaterialX MDL generator may expose multiple generated MDL parameters for
+one shared MaterialX graph input; its default value is preserved, but editing
+one generated parameter does not necessarily update the others.
 
 MDL and vMaterials licenses may restrict conversion, redistribution, or use of
 converted assets. Check the applicable licenses before processing or sharing

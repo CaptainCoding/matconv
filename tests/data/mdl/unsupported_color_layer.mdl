@@ -11,7 +11,7 @@ export material unsupported_color_layer(
 ) = let {
     color result = base::blend_color_layers(
         layers: base::color_layer[](
-            base::color_layer(foreground, weight, base::color_layer_multiply)
+            base::color_layer(foreground, weight, base::color_layer_hue)
         ),
         base: background
     ).tint;

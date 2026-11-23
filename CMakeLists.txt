@@ -93,6 +93,11 @@ if(MATCONV_WITH_SDK)
     target_sources(matconv PRIVATE
         src/mdl_runtime.cpp
         src/mdl_to_materialx.cpp
+        src/mdl_expression_translator.cpp
+        src/mdl_bsdf_translation.cpp
+        src/mdl_native_bsdf_translation.cpp
+        src/mdl_texture_translation.cpp
+        src/mdl_translation_utils.cpp
         src/materialx_to_mdl.cpp
     )
     target_compile_definitions(matconv PRIVATE
@@ -146,6 +151,11 @@ if(BUILD_TESTING)
             --input input.mtlx --output output.mdl --mdl-path modules
     )
     set_tests_properties(matconv_rejects_mdl_path_for_mtlx_input PROPERTIES WILL_FAIL TRUE)
+    add_test(NAME matconv_rejects_strict_for_mtlx_input
+        COMMAND matconv mtlx-to-mdl
+            --input input.mtlx --output output.mdl --strict
+    )
+    set_tests_properties(matconv_rejects_strict_for_mtlx_input PROPERTIES WILL_FAIL TRUE)
     if(MATCONV_WITH_SDK)
         add_test(NAME matconv_mdl_cases
             COMMAND "${CMAKE_COMMAND}"

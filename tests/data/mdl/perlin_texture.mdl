@@ -1,0 +1,27 @@
+mdl 1.7;
+
+import ::base::*;
+import ::df::*;
+
+export material perlin_texture(
+    color color1 = color(0.8, 0.9, 0.5),
+    color color2 = color(0.3, 0.6, 0.2),
+    uniform float low = 0.0,
+    uniform float high = 0.5
+) = material(
+    surface: material_surface(
+        scattering: df::diffuse_reflection_bsdf(
+            tint: base::perlin_noise_texture(
+                uvw: base::coordinate_source(
+                    coordinate_system: base::texture_coordinate_object
+                ),
+                color1: color1,
+                color2: color2,
+                noise_levels: 3,
+                absolute_noise: true,
+                noise_threshold_low: low,
+                noise_threshold_high: high
+            ).tint
+        )
+    )
+);

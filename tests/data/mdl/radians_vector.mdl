@@ -1,0 +1,14 @@
+mdl 1.7;
+
+import ::df::*;
+import ::math::*;
+
+export material radians_vector(
+    float3 angle = float3(10.0, 20.0, 30.0)
+) = material(
+    surface: material_surface(
+        scattering: df::diffuse_reflection_bsdf(
+            tint: color(math::radians(angle))
+        )
+    )
+);

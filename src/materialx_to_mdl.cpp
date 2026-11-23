@@ -82,6 +82,7 @@ void package_renderable_textures(
   std::vector<mx::ElementPtr> pending;
   pending.push_back(renderable);
   std::set<const mx::Element *> visited;
+  std::set<const mx::Input *> visited_inputs;
   while (!pending.empty()) {
     mx::ElementPtr root = std::move(pending.back());
     pending.pop_back();
@@ -90,8 +91,13 @@ void package_renderable_textures(
 
     for (mx::ElementPtr element : root->traverseTree()) {
       mx::InputPtr input = element->asA<mx::Input>();
-      if (!input)
+      if (!input || !visited_inputs.insert(input.get()).second)
         continue;
+
+      if (mx::InputPtr interface_input = input->getInterfaceInput())
+        pending.push_back(interface_input);
+      if (mx::NodePtr connected = input->getConnectedNode())
+        pending.push_back(connected);
 
       if (input->getType() == "filename" && input->hasValueString() &&
           !input->getValueString().empty()) {

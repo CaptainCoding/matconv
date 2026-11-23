@@ -1,0 +1,13 @@
+mdl 1.7;
+
+import ::df::*;
+
+export material measured_curve_glass() = material(
+    surface: material_surface(
+        scattering: df::measured_curve_factor(
+            curve_values: color[](color(0.3), color(0.8)),
+            base: df::specular_bsdf(mode: df::scatter_transmit)
+        )
+    ),
+    ior: color(1.5)
+);

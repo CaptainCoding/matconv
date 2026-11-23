@@ -1,0 +1,24 @@
+mdl 1.7;
+
+import ::df::*;
+
+export material separate_tint_glass(
+    color reflection = color(0.7, 0.8, 0.9),
+    color transmission = color(0.9, 0.8, 0.7),
+    float roughness = 0.03
+) = material(
+    surface: material_surface(
+        scattering: df::tint(
+            reflection_tint: reflection,
+            transmission_tint: transmission,
+            base: df::weighted_layer(
+                weight: 1.0,
+                layer: df::microfacet_ggx_smith_bsdf(
+                    roughness_u: roughness,
+                    mode: df::scatter_reflect_transmit
+                )
+            )
+        )
+    ),
+    ior: color(1.5)
+);

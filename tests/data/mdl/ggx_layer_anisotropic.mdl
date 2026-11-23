@@ -1,0 +1,28 @@
+mdl 1.7;
+
+import ::df::*;
+import ::state::*;
+
+export material ggx_layer_anisotropic(
+    float base_u = 0.3,
+    float base_v = 0.05,
+    float layer_u = 0.1,
+    float layer_v = 0.2,
+    float weight = 0.5
+) = material(
+    surface: material_surface(
+        scattering: df::weighted_layer(
+            weight: weight,
+            layer: df::microfacet_ggx_smith_bsdf(
+                roughness_u: layer_u,
+                roughness_v: layer_v,
+                tangent_u: state::texture_tangent_v(0)
+            ),
+            base: df::microfacet_ggx_smith_bsdf(
+                roughness_u: base_u,
+                roughness_v: base_v,
+                tangent_u: state::texture_tangent_u(0)
+            )
+        )
+    )
+);

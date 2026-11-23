@@ -1,0 +1,14 @@
+mdl 1.7;
+
+import ::df::*;
+
+export material directional_glass() = material(
+    surface: material_surface(
+        scattering: df::directional_factor(
+            normal_tint: color(0.5),
+            grazing_tint: color(1.0),
+            base: df::specular_bsdf(mode: df::scatter_transmit)
+        )
+    ),
+    ior: color(1.5)
+);

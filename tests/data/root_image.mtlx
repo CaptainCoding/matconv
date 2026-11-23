@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<materialx version="1.39">
+  <image name="root_image" type="color3">
+    <input name="file" type="filename" value="mdl/textures/checker.png" />
+  </image>
+  <standard_surface name="root_surface" type="surfaceshader">
+    <input name="base_color" type="color3" nodename="root_image" />
+  </standard_surface>
+  <surfacematerial name="root_material" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="root_surface" />
+  </surfacematerial>
+</materialx>

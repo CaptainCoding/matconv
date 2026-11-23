@@ -1,0 +1,21 @@
+mdl 1.7;
+
+import ::df::*;
+
+export material ggx_anisotropic_conductor(
+    float roughness_u = 0.3,
+    float roughness_v = 0.05
+) = material(
+    surface: material_surface(
+        scattering: df::fresnel_factor(
+            ior: color(0.3),
+            extinction_coefficient: color(3.0),
+            base: df::microfacet_ggx_smith_bsdf(
+                roughness_u: roughness_u,
+                roughness_v: roughness_v,
+                multiscatter_tint: color(0.0),
+                mode: df::scatter_reflect
+            )
+        )
+    )
+);

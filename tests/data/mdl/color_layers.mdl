@@ -16,7 +16,9 @@ export material color_layers(
     color result = base::blend_color_layers(
         layers: base::color_layer[](
             base::color_layer(foreground, weight, base::color_layer_blend),
-            base::color_layer(color(0.1), -remainder, base::color_layer_add)
+            base::color_layer(color(0.1), -remainder, base::color_layer_add),
+            base::color_layer(color(0.8, 0.6, 0.4), weight, base::color_layer_multiply),
+            base::color_layer(color(0.2, 0.7, 0.6), weight, base::color_layer_overlay)
         ),
         base: background
     ).tint;
