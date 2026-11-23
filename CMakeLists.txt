@@ -3,6 +3,11 @@ cmake_minimum_required(VERSION 3.20)
 project(matconv VERSION 0.1.0 LANGUAGES CXX)
 
 option(MATCONV_FETCH_DEPENDENCIES "Fetch the MDL SDK and MaterialX from GitHub" OFF)
+option(MATCONV_DIAGNOSTIC_RENDERER "Build the adapted MDL Core diagnostic renderer" OFF)
+
+if(MATCONV_DIAGNOSTIC_RENDERER AND NOT MATCONV_FETCH_DEPENDENCIES)
+    message(FATAL_ERROR "The diagnostic renderer requires MATCONV_FETCH_DEPENDENCIES=ON.")
+endif()
 
 if(MATCONV_FETCH_DEPENDENCIES)
     if(CMAKE_VERSION VERSION_LESS 3.26)
@@ -69,6 +74,49 @@ if(MATCONV_FETCH_DEPENDENCIES)
     set(MDL_DOC_FOLDER "${_mdl_sdk_source_dir}/doc" CACHE PATH "MDL SDK documentation" FORCE)
     FetchContent_MakeAvailable(matconv_mdl_sdk)
 
+    if(MATCONV_DIAGNOSTIC_RENDERER)
+        if(NOT TARGET examples-mdl_core-df_native)
+            message(FATAL_ERROR
+                "The diagnostic renderer requires MDL_BUILD_CORE_EXAMPLES=ON.")
+        endif()
+        execute_process(COMMAND "${clang_PATH}" --version
+            RESULT_VARIABLE _clang_result OUTPUT_VARIABLE _clang_version)
+        if(NOT _clang_result EQUAL 0 OR
+           NOT _clang_version MATCHES "clang version 12[.]")
+            message(FATAL_ERROR
+                "The diagnostic renderer requires Clang 12 for the MDL SDK's "
+                "LLVM 12 bitcode. Set clang_PATH to a Clang 12 executable and "
+                "use a fresh build directory.")
+        endif()
+        set(_diagnostic_dir "${CMAKE_CURRENT_BINARY_DIR}/diagnostic-renderer")
+        file(MAKE_DIRECTORY "${_diagnostic_dir}")
+        set(_diagnostic_header "${_diagnostic_dir}/texture_support_native.h")
+        set(_diagnostic_source "${_diagnostic_dir}/diagnostic_example_df_native.cpp")
+        set(_sdk_texture_header "${_mdl_sdk_source_dir}/examples/mdl_core/shared/texture_support_native.h")
+        set(_sdk_renderer_source "${_mdl_sdk_source_dir}/examples/mdl_core/df_native/example_df_native.cpp")
+        add_custom_command(
+            OUTPUT "${_diagnostic_header}" "${_diagnostic_source}"
+            COMMAND "${CMAKE_COMMAND}"
+                "-DSDK_HEADER=${_sdk_texture_header}"
+                "-DSDK_SOURCE=${_sdk_renderer_source}"
+                "-DOUTPUT_HEADER=${_diagnostic_header}"
+                "-DOUTPUT_SOURCE=${_diagnostic_source}"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tools/df_native/prepare_texture_header.cmake"
+            DEPENDS "${_sdk_texture_header}" "${_sdk_renderer_source}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tools/df_native/prepare_texture_header.cmake"
+            VERBATIM
+        )
+        add_custom_target(matconv_diagnostic_sources
+            DEPENDS "${_diagnostic_header}" "${_diagnostic_source}")
+        add_dependencies(examples-mdl_core-df_native matconv_diagnostic_sources)
+        set_property(TARGET examples-mdl_core-df_native PROPERTY SOURCES
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/df_native/renderer.cpp")
+        target_include_directories(examples-mdl_core-df_native BEFORE PRIVATE
+            "${_diagnostic_dir}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/df_native")
+        set_property(TARGET examples-mdl_core-df_native APPEND PROPERTY BUILD_RPATH
+            "$<TARGET_FILE_DIR:prod-lib-mdl_core>")
+    endif()
+
     FetchContent_Declare(
         matconv_materialx
         GIT_REPOSITORY https://github.com/AcademySoftwareFoundation/MaterialX.git
@@ -97,6 +145,7 @@ if(MATCONV_WITH_SDK)
         src/mdl_bsdf_translation.cpp
         src/mdl_native_bsdf_translation.cpp
         src/mdl_texture_translation.cpp
+        src/mdl_uv_inline.cpp
         src/mdl_translation_utils.cpp
         src/materialx_to_mdl.cpp
     )
@@ -165,5 +214,16 @@ if(BUILD_TESTING)
                 "-DOUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/mdl-cases"
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_mdl_cases.cmake"
         )
+    endif()
+    if(MATCONV_DIAGNOSTIC_RENDERER)
+        add_executable(matconv_diagnostic_texture_test
+            tests/diagnostic_texture_test.cpp)
+        target_compile_features(matconv_diagnostic_texture_test PRIVATE cxx_std_17)
+        target_include_directories(matconv_diagnostic_texture_test PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/df_native")
+        target_link_libraries(matconv_diagnostic_texture_test PRIVATE OpenImageIO::OpenImageIO)
+        add_test(NAME matconv_diagnostic_texture
+            COMMAND matconv_diagnostic_texture_test
+                    "${CMAKE_CURRENT_BINARY_DIR}/diagnostic-texture-test")
     endif()
 endif()

@@ -1,0 +1,26 @@
+mdl 1.7;
+
+import ::anno::*;
+import ::base::*;
+import ::df::*;
+import ::state::*;
+import ::tex::*;
+
+base::texture_coordinate_info adjust_uv(
+    base::texture_coordinate_info source, bool use_unsupported
+) [[ anno::noinline() ]] {
+    float3 position = use_unsupported
+        ? state::rounded_corner_normal(0.1)
+        : source.position;
+    return base::texture_coordinate_info(
+        position, source.tangent_u, source.tangent_v, source.source_flags);
+}
+
+export material uv_function_statement_partial(bool use_unsupported = false) = let {
+    base::texture_coordinate_info uv =
+        adjust_uv(base::coordinate_source(), use_unsupported);
+    color sample = base::file_texture(
+        texture_2d("textures/checker.png", tex::gamma_linear), uvw: uv).tint;
+} in material(surface: material_surface(
+    scattering: df::diffuse_reflection_bsdf(tint: sample)
+));

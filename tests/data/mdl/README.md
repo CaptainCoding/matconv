@@ -53,9 +53,16 @@ reverse direction.
 | `base_file_texture.mdl` | `base::file_texture` color and average mono with scale and offset |
 | `base_file_texture_alpha.mdl` | Explicit warning for unsupported alpha mono output |
 | `base_file_texture_transformed.mdl` | Identity texture-coordinate matrix |
+| `texture_return_conditional.mdl` | Nested texture-return choices preserve color and mono branches |
+| `texture_return_partial.mdl` | Unsupported mono branch reports the conditional fallback |
+| `texture_function.mdl` | Nested texture functions with bound images and distinct transformed UVs |
+| `texture_function_unsupported.mdl` | Unsupported texture-function statement body reports a loss |
 | `texture_channels.mdl` | Texture channel indexing, numeric selection and negation |
 | `metallic_diffuse_layer.mdl` | Color-weighted metallic and diffuse layering approximation |
 | `color_layers.mdl` | Layer blend/add/multiply/overlay, boolean expressions and signed scalar remainder |
+| `fractional_color.mdl` | Fractional part of a vector, including a negative coordinate |
+| `scalar_vector_constructor.mdl` | Scalar replication and lengths for two-, three- and four-component vectors |
+| `vector_lerp.mdl` | Componentwise vector interpolation with independently varying weights |
 | `perlin_texture.mdl` | Object-space 3D noise with octave accumulation and color thresholds |
 | `perlin_unsupported.mdl` | Warning and omission for unsupported Perlin phase |
 | `radians_vector.mdl` | Vector-valued degrees-to-radians conversion |
@@ -63,11 +70,17 @@ reverse direction.
 | `unsupported_color_layer.mdl` | Unsupported mode warning and propagation of failed expressions |
 | `uv_transform.mdl` | Parameterized scale, translation and matrix-product rotation |
 | `uv_function.mdl` | Nested expression-bodied UV functions with parameters and normal-map tangents |
-| `uv_function_unsupported.mdl` | Warning and UV0 fallback for a function body unavailable from the SDK |
+| `uv_function_conditional.mdl` | Conditional UV coordinates and normal-map tangents |
+| `uv_function_statement.mdl` | Local statements, conditional UVs and tangent selection with independent texture lookups |
+| `uv_function_statement_matrix.mdl` | Matrix-product UVs and normal-map tangents in a function with local statements |
+| `uv_function_statement_partial.mdl` | Unsupported inlined UV branch reports the UV0 fallback |
+| `uv_function_unsupported.mdl` | Warning and UV0 fallback when the SDK cannot inline control flow |
 | `unsupported_uv.mdl` | Explicit UV0 fallback for spherical projection |
 | `normal_layer.mdl` | Tangent-space normal texture on a BSDF layer |
 | `normal_layer_uv.mdl` | Rotated and scaled UV coordinates with a normal texture |
 | `normal_geometry.mdl` | Rotated normal texture on geometry, including tangent flip |
+| `geometry_normal_coat.mdl` | Geometry normal on the surface, coat and backface |
+| `geometry_normal_layer.mdl` | Independent layer normal retained with a combination warning |
 
 Configure with the `mdl-with-image-plugin` preset so the MDL SDK can resolve
 the image resource. The conversion tests check document contents and resource
@@ -79,3 +92,11 @@ white or black, particularly generated materials in class-compilation mode.
 Local diagnostic renders with a 3D BSDF-table lookup no longer exhibited these
 failures in the reflection, glass, diffuse and texture cases tested. This does
 not establish equivalence for all materials or renderer configurations.
+
+The optional adapted renderer requires Clang 12 for the SDK's LLVM 12
+bitcode. Configure a fresh build with
+`cmake --preset mdl-diagnostic-renderer -Dclang_PATH=<path-to-clang-12>`, then
+`cmake --build build/mdl-diagnostic-renderer --target examples-mdl_core-df_native matconv_diagnostic_texture_test`.
+Run its image tests with
+`ctest --test-dir build/mdl-diagnostic-renderer -R '^matconv_diagnostic_texture$' --output-on-failure`.
+The renderer handles BSDF tables but not general 3D textures or volume effects.

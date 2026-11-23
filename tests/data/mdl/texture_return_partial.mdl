@@ -1,0 +1,20 @@
+mdl 1.7;
+
+import ::base::*;
+import ::df::*;
+import ::tex::*;
+
+export material texture_return_partial(bool use_texture = true) = let {
+    base::texture_return sample = use_texture
+        ? base::file_texture(
+            texture_2d("textures/checker.png", tex::gamma_linear),
+            mono_source: base::mono_alpha)
+        : base::texture_return(color(0.2), 0.3);
+} in material(
+    surface: material_surface(
+        scattering: df::diffuse_reflection_bsdf(
+            tint: sample.tint,
+            roughness: sample.mono
+        )
+    )
+);

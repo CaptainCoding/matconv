@@ -7,8 +7,11 @@ ExpressionTranslator::ExpressionTranslator(
     const mdl::ICompiled_material *compiled, mdl::ITransaction *transaction,
     const mx::NodeGraphPtr &graph, ConversionReport &report,
     const std::string &material, TextureResourcePackager &texture_packager,
-    std::filesystem::path resource_directory)
-    : compiled_(compiled), transaction_(transaction), graph_(graph),
+    std::filesystem::path resource_directory, mdl::IMdl_factory *factory,
+    mdl::IMdl_impexp_api *impexp, mdl::IScope *scope)
+    : compiled_(compiled), transaction_(transaction),
+      original_transaction_(transaction), factory_(factory), impexp_(impexp),
+      scope_(scope), graph_(graph),
       report_(report), material_(material), texture_packager_(texture_packager),
       resource_directory_(std::move(resource_directory)) {
   for (mi::Size index = 0; index < compiled_->get_parameter_count(); ++index) {
@@ -148,8 +151,19 @@ MxExpression ExpressionTranslator::translate_temporary(
     const mdl::IExpression_temporary *expression) {
   const mi::Size index = expression->get_index();
   if (function_scope_) {
+    const std::size_t scope_id =
+        thin_films_.empty() ? 0 : thin_films_.front().scope_id;
+    const auto key = std::make_pair(index, scope_id);
+    if (function_scope_->compiled) {
+      const auto found = function_scope_->temporaries.find(key);
+      if (found != function_scope_->temporaries.end())
+        return found->second;
+    }
     mi::base::Handle<const mdl::IExpression> temporary(resolve_temporary(index));
-    return translate(temporary.get());
+    MxExpression result = translate(temporary.get());
+    if (function_scope_->compiled)
+      function_scope_->temporaries[key] = result;
+    return result;
   }
   const std::size_t scope_id =
       thin_films_.empty() ? 0 : thin_films_.front().scope_id;
@@ -167,7 +181,9 @@ MxExpression ExpressionTranslator::translate_temporary(
 mi::base::Handle<const mdl::IExpression>
 ExpressionTranslator::resolve_temporary(mi::Size index) {
   return mi::base::Handle<const mdl::IExpression>(
-      function_scope_ ? function_scope_->definition->get_temporary(index)
+      function_scope_ && function_scope_->compiled
+          ? function_scope_->compiled->get_temporary(index)
+          : function_scope_ ? function_scope_->definition->get_temporary(index)
                       : compiled_->get_temporary(index));
 }
 
@@ -263,6 +279,55 @@ MxExpression ExpressionTranslator::translate_color_lerp(
                      material_, "color lerp scaled delta");
   report_.translated_nodes += 3;
   return {result, {}, "color3"};
+}
+
+MxExpression ExpressionTranslator::conditional_expression(
+    const MxExpression &condition, const MxExpression &yes,
+    const MxExpression &no) {
+  if (!yes.valid() || !no.valid()) {
+    if (yes.valid() != no.valid()) {
+      if (strict_uv_depth_ != 0) {
+        report_.warn(material_ +
+                     ": an inlined UV conditional branch could not be represented.");
+        return {};
+      }
+      report_.warn(material_ +
+                   ": one conditional expression branch was omitted; "
+                   "using the translatable branch for both cases.");
+      return yes.valid() ? yes : no;
+    }
+    return {};
+  }
+  if (!condition.valid() || condition.type != "boolean" ||
+      yes.type != no.type ||
+      (yes.type != "boolean" && yes.type != "float" && yes.type != "color3" &&
+       yes.type != "vector2" && yes.type != "vector3" &&
+       yes.type != "vector4")) {
+    report_.warn(material_ +
+                 ": conditional expression cannot be represented.");
+    return {};
+  }
+  if (yes.type == "boolean") {
+    MxExpression not_condition = make_logical_expression("not", condition);
+    MxExpression yes_branch = make_logical_expression("and", condition, yes);
+    MxExpression no_branch =
+        make_logical_expression("and", not_condition, no);
+    return make_logical_expression("or", yes_branch, no_branch);
+  }
+  mx::NodePtr select =
+      graph_->addNode("ifequal", next_name("conditional"), yes.type);
+  select->setNodeDefString("ND_ifequal_" + yes.type + "B");
+  add_node_inputs_from_definition(select);
+  select->getInput("value2")->setValueString("true");
+  if (!connect_expression(condition, select->getInput("value1"), report_,
+                          material_, "conditional expression") ||
+      !connect_expression(yes, select->getInput("in1"), report_, material_,
+                          "conditional true value") ||
+      !connect_expression(no, select->getInput("in2"), report_, material_,
+                          "conditional false value"))
+    return {};
+  ++report_.translated_nodes;
+  return {select, {}, yes.type};
 }
 
 MxExpression ExpressionTranslator::translate_call(
@@ -421,6 +486,28 @@ MxExpression ExpressionTranslator::translate_call(
     mi::base::Handle<const mdl::IType> source_type(source ? source->get_type()
                                                           : nullptr);
     const std::string type = mdl_type_to_materialx(source_type.get());
+    if (source_type && source_type->get_kind() == mdl::IType::TK_MATRIX &&
+        index && index->get_kind() == mdl::IExpression::EK_CONSTANT) {
+      mi::base::Handle<const mdl::IType_matrix> matrix(
+          source_type->get_interface<mdl::IType_matrix>());
+      mi::base::Handle<const mdl::IType_vector> column(
+          matrix ? matrix->get_element_type() : nullptr);
+      mi::base::Handle<const mdl::IType_atomic> element(
+          column ? column->get_element_type() : nullptr);
+      mi::base::Handle<const mdl::IValue> value(
+          static_cast<const mdl::IExpression_constant *>(index.get())
+              ->get_value());
+      if (!matrix || !column || !element || matrix->get_size() != 4 ||
+          column->get_size() != 4 ||
+          element->get_kind() != mdl::IType::TK_FLOAT || !value ||
+          value->get_kind() != mdl::IValue::VK_INT)
+        return {};
+      const mi::Sint32 component =
+          static_cast<const mdl::IValue_int *>(value.get())->get_value();
+      return component >= 0 && component < 4
+                 ? matrix_column(source.get(), static_cast<mi::Size>(component))
+                 : MxExpression{};
+    }
     if ((type != "vector2" && type != "vector3" && type != "vector4") ||
         !index || index->get_kind() != mdl::IExpression::EK_CONSTANT) {
       report_.warn(material_ + ": MDL indexed access requires a vector and "
@@ -452,49 +539,38 @@ MxExpression ExpressionTranslator::translate_call(
     ++report_.translated_nodes;
     return {extract, {}, "float"};
   }
+  if (semantic == S::DS_MULTIPLY) {
+    mi::base::Handle<const mdl::IExpression_list> args(
+        expression->get_arguments());
+    mi::base::Handle<const mdl::IExpression> left(
+        args && args->get_size() == 2 ? args->get_expression(mi::Size(0))
+                                      : nullptr);
+    mi::base::Handle<const mdl::IExpression> right(
+        args && args->get_size() == 2 ? args->get_expression(mi::Size(1))
+                                      : nullptr);
+    mi::base::Handle<const mdl::IType> left_type(left ? left->get_type()
+                                                     : nullptr);
+    mi::base::Handle<const mdl::IType> right_type(right ? right->get_type()
+                                                       : nullptr);
+    if (left_type && left_type->get_kind() == mdl::IType::TK_MATRIX &&
+        mdl_type_to_materialx(right_type.get()) == "vector4") {
+      mi::base::Handle<const mdl::IType_matrix> matrix(
+          left_type->get_interface<mdl::IType_matrix>());
+      mi::base::Handle<const mdl::IType_vector> column(
+          matrix ? matrix->get_element_type() : nullptr);
+      mi::base::Handle<const mdl::IType_atomic> element(
+          column ? column->get_element_type() : nullptr);
+      if (matrix && column && element && matrix->get_size() == 4 &&
+          column->get_size() == 4 &&
+          element->get_kind() == mdl::IType::TK_FLOAT)
+        return matrix_vector_product(left.get(), right.get());
+    }
+  }
   if (semantic == S::DS_TERNARY) {
     MxExpression condition = translate(argument(expression, "cond").get());
     MxExpression yes = translate(argument(expression, "true_exp").get());
     MxExpression no = translate(argument(expression, "false_exp").get());
-    if (!yes.valid() || !no.valid()) {
-      if (yes.valid() != no.valid()) {
-        report_.warn(material_ +
-                     ": one conditional expression branch was omitted; "
-                     "using the translatable branch for both cases.");
-        return yes.valid() ? yes : no;
-      }
-      return {};
-    }
-    if (!condition.valid() || condition.type != "boolean" ||
-        yes.type != no.type ||
-        (yes.type != "boolean" && yes.type != "float" && yes.type != "color3" &&
-         yes.type != "vector2" && yes.type != "vector3" &&
-         yes.type != "vector4")) {
-      report_.warn(material_ +
-                   ": conditional expression cannot be represented.");
-      return {};
-    }
-    if (yes.type == "boolean") {
-      MxExpression not_condition = make_logical_expression("not", condition);
-      MxExpression yes_branch = make_logical_expression("and", condition, yes);
-      MxExpression no_branch =
-          make_logical_expression("and", not_condition, no);
-      return make_logical_expression("or", yes_branch, no_branch);
-    }
-    mx::NodePtr select =
-        graph_->addNode("ifequal", next_name("conditional"), yes.type);
-    select->setNodeDefString("ND_ifequal_" + yes.type + "B");
-    add_node_inputs_from_definition(select);
-    select->getInput("value2")->setValueString("true");
-    if (!connect_expression(condition, select->getInput("value1"), report_,
-                            material_, "conditional expression") ||
-        !connect_expression(yes, select->getInput("in1"), report_, material_,
-                            "conditional true value") ||
-        !connect_expression(no, select->getInput("in2"), report_, material_,
-                            "conditional false value"))
-      return {};
-    ++report_.translated_nodes;
-    return {select, {}, yes.type};
+    return conditional_expression(condition, yes, no);
   }
   if (semantic == S::DS_LOGICAL_OR || semantic == S::DS_LOGICAL_AND ||
       semantic == S::DS_LOGICAL_NOT) {
@@ -550,13 +626,21 @@ MxExpression ExpressionTranslator::translate_call(
         args && args->get_size() == 1 ? args->get_expression(mi::Size(0))
                                       : nullptr);
     MxExpression value = translate(input.get());
-    if (!value.valid() || value.type != "float") {
+    if (!value.valid() ||
+        (value.type != "float" && value.type != "vector2" &&
+         value.type != "vector3" && value.type != "vector4")) {
       report_.warn(material_ + ": unsupported MDL unary negation.");
       return {};
     }
+    std::string zero_value = "0.0";
+    if (value.type != "float") {
+      for (int i = 1; i < value.type.back() - '0'; ++i)
+        zero_value += ", 0.0";
+    }
     MxExpression zero =
-        make_constant_expression("float", "0.0", "negative_zero");
-    return make_binary_expression("subtract", "float", zero, value, "negative");
+        make_constant_expression(value.type, zero_value, "negative_zero");
+    return make_binary_expression("subtract", value.type, zero, value,
+                                  "negative");
   }
   if (semantic == S::DS_GREATER || semantic == S::DS_LESS ||
       semantic == S::DS_GREATER_OR_EQUAL || semantic == S::DS_LESS_OR_EQUAL ||
@@ -730,7 +814,11 @@ MxExpression ExpressionTranslator::translate_call(
     state_normal = true;
   } else if (semantic == mdl::IFunction_definition::DS_ELEM_CONSTRUCTOR ||
              (semantic == mdl::IFunction_definition::DS_CONV_CONSTRUCTOR &&
-              mdl_name && std::string(mdl_name) == "color(float)")) {
+              mdl_name &&
+              (std::string(mdl_name) == "color(float)" ||
+               std::string(mdl_name) == "float2(float)" ||
+               std::string(mdl_name) == "float3(float)" ||
+               std::string(mdl_name) == "float4(float)"))) {
     mi::base::Handle<const mdl::IType> type(expression->get_type());
     const std::string type_name = mdl_type_to_materialx(type.get());
     if (type_name == "color3" || type_name == "vector3")
@@ -745,6 +833,11 @@ MxExpression ExpressionTranslator::translate_call(
   }
 
   if (!category) {
+    MxExpression result = with_function_body(
+        expression, definition.get(),
+        [this](const mdl::IExpression *body) { return translate(body); });
+    if (result.valid())
+      return result;
     const char *mdl_name = definition->get_mdl_name();
     report_.warn(material_ + ": unsupported MDL call " +
                  (mdl_name ? mdl_name : definition_name) +
@@ -760,7 +853,8 @@ MxExpression ExpressionTranslator::translate_call(
                  ? (diffuse_emission ? "EDF" : "vector3")
                  : mdl_type_to_materialx(expression_type.get()));
   if (output_type.empty()) {
-    report_.warn(material_ + ": unsupported output type for MDL call.");
+    report_.warn(material_ + ": unsupported output type for MDL call " +
+                 (mdl_name ? mdl_name : definition_name) + ".");
     return {};
   }
   const bool color_sqrt =
@@ -778,7 +872,17 @@ MxExpression ExpressionTranslator::translate_call(
       graph_->addNode(category, next_name(category), output_type);
   if (color_average)
     node->setNodeDefString("ND_dotproduct_vector3");
-  if (semantic == mdl::IFunction_definition::DS_INTRINSIC_MATH_DOT) {
+  if (semantic == mdl::IFunction_definition::DS_INTRINSIC_MATH_LERP &&
+      (output_type == "vector2" || output_type == "vector3" ||
+       output_type == "vector4")) {
+    mi::base::Handle<const mdl::IExpression> weight = argument(expression, "l");
+    mi::base::Handle<const mdl::IType> weight_type(
+        weight ? weight->get_type() : nullptr);
+    if (mdl_type_to_materialx(weight_type.get()) == output_type)
+      node->setNodeDefString("ND_mix_" + output_type + "_" + output_type);
+  }
+  if (semantic == mdl::IFunction_definition::DS_INTRINSIC_MATH_DOT ||
+      semantic == mdl::IFunction_definition::DS_INTRINSIC_MATH_LENGTH) {
     mi::base::Handle<const mdl::IExpression_list> args(
         expression->get_arguments());
     mi::base::Handle<const mdl::IExpression> first(
@@ -788,10 +892,14 @@ MxExpression ExpressionTranslator::translate_call(
     const std::string input_type = mdl_type_to_materialx(type.get());
     if (input_type != "vector2" && input_type != "vector3" &&
         input_type != "vector4") {
-      report_.warn(material_ + ": unsupported math::dot input type.");
+      report_.warn(material_ + ": unsupported " +
+                   (semantic == mdl::IFunction_definition::DS_INTRINSIC_MATH_DOT
+                        ? "math::dot"
+                        : "math::length") +
+                   " input type.");
       return {};
     }
-    node->setNodeDefString("ND_dotproduct_" + input_type);
+    node->setNodeDefString(std::string("ND_") + category + "_" + input_type);
   }
   add_node_inputs_from_definition(node);
   if (state_normal)

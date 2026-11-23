@@ -1,0 +1,20 @@
+mdl 1.7;
+
+import ::anno::*;
+import ::base::*;
+import ::df::*;
+import ::tex::*;
+
+base::texture_return choose_texture(uniform texture_2d image, bool use_texture)
+    [[ anno::noinline() ]] {
+    if (use_texture)
+        return base::file_texture(image);
+    return base::texture_return(color(0.2), 0.2);
+}
+
+export material texture_function_unsupported(bool use_texture = true) = material(
+    surface: material_surface(scattering: df::diffuse_reflection_bsdf(
+        tint: choose_texture(
+            texture_2d("textures/checker.png", tex::gamma_linear),
+            use_texture).tint))
+);

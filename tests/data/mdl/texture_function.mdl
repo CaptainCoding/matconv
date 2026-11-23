@@ -1,0 +1,52 @@
+mdl 1.7;
+
+import ::anno::*;
+import ::base::*;
+import ::df::*;
+import ::tex::*;
+
+base::texture_return sample_texture(
+    uniform texture_2d image,
+    base::texture_coordinate_info coordinates,
+    float brightness
+) [[ anno::noinline() ]] =
+    base::file_texture(
+        texture: image,
+        uvw: coordinates,
+        color_scale: color(brightness),
+        mono_source: base::mono_average);
+
+base::texture_return nested_texture(
+    float brightness,
+    uniform texture_2d image,
+    base::texture_coordinate_info coordinates
+) [[ anno::noinline() ]] = sample_texture(image, coordinates, brightness);
+
+color texture_color(
+    uniform texture_2d image,
+    base::texture_coordinate_info coordinates,
+    float brightness
+) [[ anno::noinline() ]] =
+    nested_texture(brightness, image, coordinates).tint;
+
+export material texture_function(float brightness = 0.6, float scale = 2.0) = let {
+    float4x4 transform = float4x4(
+        scale, 0.0, 0.0, 0.0,
+        0.0, 3.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.25, 0.0, 0.0, 1.0);
+    base::texture_coordinate_info uv = base::transform_coordinate(
+        transform, base::coordinate_source());
+    base::texture_coordinate_info roughness_uv = base::transform_coordinate(
+        float4x4(
+            scale * 0.5, 0.0, 0.0, 0.0,
+            0.0, 1.5, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.5, 0.0, 0.0, 1.0),
+        base::coordinate_source());
+    uniform texture_2d image = texture_2d("textures/checker.png", tex::gamma_linear);
+    color tint = texture_color(image, uv, brightness);
+    float roughness = nested_texture(brightness, image, roughness_uv).mono;
+} in material(surface: material_surface(
+    scattering: df::diffuse_reflection_bsdf(tint: tint, roughness: roughness)
+));

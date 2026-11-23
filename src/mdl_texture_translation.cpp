@@ -15,25 +15,16 @@ namespace matconv::detail::mdl_translation {
 MxExpression ExpressionTranslator::translate_uv_function(
     const mdl::IExpression_direct_call *call,
     const mdl::IFunction_definition *definition, bool tangent, bool u) {
-  if (definition->get_semantic() != mdl::IFunction_definition::DS_UNKNOWN)
+  if (!definition || definition->get_semantic() !=
+                         mdl::IFunction_definition::DS_UNKNOWN)
     return {};
-  const char *name = definition->get_mdl_name();
-  if (!name)
-    return {};
-  for (FunctionScope *scope = function_scope_; scope; scope = scope->parent) {
-    const char *active = scope->definition->get_mdl_name();
-    if (active && std::string(active) == name)
-      return {};
-  }
   mi::base::Handle<const mdl::IExpression> body(definition->get_body());
-  mi::base::Handle<const mdl::IExpression_list> arguments(
-      call->get_arguments());
-  if (!body || !arguments)
-    return {};
-  FunctionScope scope{definition, arguments, function_scope_};
-  ScopeGuard guard(function_scope_, &scope);
-  return tangent ? texture_tangent(body.get(), u)
-                 : texture_coordinates(body.get());
+  if (!body)
+    return inline_uv_function(call, definition, tangent, u);
+  return with_function_body(call, definition, [this, tangent, u](
+                                                const mdl::IExpression *body) {
+    return tangent ? texture_tangent(body, u) : texture_coordinates(body);
+  });
 }
 
 std::optional<mi::Sint32> ExpressionTranslator::texture_coordinate_index(
@@ -171,6 +162,82 @@ ExpressionTranslator::matrix_component(const mdl::IExpression *expression,
 }
 
 MxExpression
+ExpressionTranslator::conditional_texture_coordinates(
+    const mdl::IExpression_direct_call *call, bool tangent, bool u) {
+  MxExpression condition = translate(argument(call, "cond").get());
+  mi::base::Handle<const mdl::IExpression> yes = argument(call, "true_exp");
+  mi::base::Handle<const mdl::IExpression> no = argument(call, "false_exp");
+  MxExpression first = tangent ? texture_tangent(yes.get(), u)
+                               : texture_coordinates(yes.get());
+  MxExpression second = tangent ? texture_tangent(no.get(), u)
+                                : texture_coordinates(no.get());
+  if (!condition.valid() || !first.valid() || !second.valid())
+    return {};
+  return conditional_expression(condition, first, second);
+}
+
+MxExpression ExpressionTranslator::matrix_column(
+    const mdl::IExpression *expression, mi::Size column) {
+  mx::NodePtr result = graph_->addNode("combine4", next_name("matrix_column"),
+                                       "vector4");
+  add_node_inputs_from_definition(result);
+  for (mi::Size row = 0; row < 4; ++row) {
+    MxExpression component = matrix_component(expression, column, row);
+    if (!component.valid() ||
+        !connect_expression(
+            component, result->getInput("in" + std::to_string(row + 1)),
+            report_, material_, "matrix column"))
+      return {};
+  }
+  ++report_.translated_nodes;
+  return {result, {}, "vector4"};
+}
+
+MxExpression ExpressionTranslator::matrix_vector_product(
+    const mdl::IExpression *matrix, const mdl::IExpression *vector) {
+  MxExpression source = translate(vector);
+  if (!source.valid() || source.type != "vector4")
+    return {};
+  std::array<MxExpression, 4> components;
+  for (mi::Size column = 0; column < 4; ++column) {
+    mx::NodePtr extract =
+        graph_->addNode("extract", next_name("matrix_vector_input"), "float");
+    extract->setNodeDefString("ND_extract_vector4");
+    add_node_inputs_from_definition(extract);
+    extract->getInput("index")->setValueString(std::to_string(column));
+    if (!connect_expression(source, extract->getInput("in"), report_, material_,
+                            "matrix vector input"))
+      return {};
+    components[column] = {extract, {}, "float"};
+    ++report_.translated_nodes;
+  }
+  mx::NodePtr result = graph_->addNode("combine4", next_name("matrix_vector"),
+                                       "vector4");
+  add_node_inputs_from_definition(result);
+  for (mi::Size row = 0; row < 4; ++row) {
+    MxExpression sum;
+    for (mi::Size column = 0; column < 4; ++column) {
+      MxExpression coefficient = matrix_component(matrix, column, row);
+      if (!coefficient.valid())
+        return {};
+      MxExpression product =
+          make_binary_expression("multiply", "float", coefficient,
+                                 components[column], "matrix_vector_product");
+      sum = sum.valid() ? make_binary_expression("add", "float", sum, product,
+                                                  "matrix_vector_sum")
+                        : product;
+    }
+    if (!sum.valid() ||
+        !connect_expression(
+            sum, result->getInput("in" + std::to_string(row + 1)), report_,
+            material_, "matrix vector product"))
+      return {};
+  }
+  ++report_.translated_nodes;
+  return {result, {}, "vector4"};
+}
+
+MxExpression
 ExpressionTranslator::texture_coordinates(const mdl::IExpression *expression) {
   if (!expression)
     return {};
@@ -197,6 +264,8 @@ ExpressionTranslator::texture_coordinates(const mdl::IExpression *expression) {
   const char *mdl_name = definition ? definition->get_mdl_name() : nullptr;
   if (!mdl_name)
     return {};
+  if (definition->get_semantic() == mdl::IFunction_definition::DS_TERNARY)
+    return conditional_texture_coordinates(call, false, false);
   const std::string function(mdl_name);
   if (definition->get_semantic() ==
       mdl::IFunction_definition::DS_INTRINSIC_STATE_TEXTURE_COORDINATE) {
@@ -319,6 +388,8 @@ ExpressionTranslator::texture_tangent(const mdl::IExpression *expression,
   const char *mdl_name = definition ? definition->get_mdl_name() : nullptr;
   if (!mdl_name)
     return {};
+  if (definition->get_semantic() == mdl::IFunction_definition::DS_TERNARY)
+    return conditional_texture_coordinates(call, true, u);
   const std::string function(mdl_name);
   if (function.find("::base::texture_coordinate_info(") == 0) {
     MxExpression result =
@@ -463,6 +534,27 @@ ExpressionTranslator::texture_tangent(const mdl::IExpression *expression,
   return {select, {}, "vector3"};
 }
 
+mi::base::Handle<const mdl::IValue>
+ExpressionTranslator::resolve_texture_resource(const mdl::IExpression *expression) {
+  if (!expression)
+    return {};
+  if (expression->get_kind() == mdl::IExpression::EK_TEMPORARY) {
+    mi::base::Handle<const mdl::IExpression> value(resolve_temporary(
+        static_cast<const mdl::IExpression_temporary *>(expression)->get_index()));
+    return resolve_texture_resource(value.get());
+  }
+  if (function_scope_ && expression->get_kind() == mdl::IExpression::EK_PARAMETER)
+    return with_bound_argument(
+        static_cast<const mdl::IExpression_parameter *>(expression),
+        [this](const mdl::IExpression *argument) {
+          return resolve_texture_resource(argument);
+        });
+  if (expression->get_kind() != mdl::IExpression::EK_CONSTANT)
+    return {};
+  return mi::base::Handle<const mdl::IValue>(
+      static_cast<const mdl::IExpression_constant *>(expression)->get_value());
+}
+
 MxExpression ExpressionTranslator::translate_texture_lookup(
     const mdl::IExpression_direct_call *expression, bool base_file_texture,
     const std::string &base_output_type) {
@@ -491,22 +583,8 @@ MxExpression ExpressionTranslator::translate_texture_lookup(
     }
   }
 
-  const mdl::IExpression *resource_expression = texture_expression.get();
-  mi::base::Handle<const mdl::IExpression> temporary;
-  while (resource_expression &&
-         resource_expression->get_kind() == mdl::IExpression::EK_TEMPORARY) {
-    temporary = compiled_->get_temporary(
-        static_cast<const mdl::IExpression_temporary *>(resource_expression)
-            ->get_index());
-    resource_expression = temporary.get();
-  }
-  mi::base::Handle<const mdl::IValue> resource_value;
-  if (resource_expression &&
-      resource_expression->get_kind() == mdl::IExpression::EK_CONSTANT) {
-    resource_value =
-        static_cast<const mdl::IExpression_constant *>(resource_expression)
-            ->get_value();
-  }
+  mi::base::Handle<const mdl::IValue> resource_value(
+      resolve_texture_resource(texture_expression.get()));
   if (!resource_value ||
       resource_value->get_kind() != mdl::IValue::VK_TEXTURE) {
     report_.warn(material_ +
@@ -1047,19 +1125,55 @@ MxExpression ExpressionTranslator::translate_file_texture_field(
       field_arguments && field_arguments->get_size() == 1
           ? field_arguments->get_expression(mi::Size(0))
           : nullptr);
-  while (source && source->get_kind() == mdl::IExpression::EK_TEMPORARY) {
-    source = compiled_->get_temporary(
-        static_cast<const mdl::IExpression_temporary *>(source.get())
-            ->get_index());
+  return translate_texture_return_field(source.get(), mono);
+}
+
+MxExpression ExpressionTranslator::translate_texture_return_field(
+    const mdl::IExpression *source, bool mono) {
+  if (!source)
+    return {};
+  if (source->get_kind() == mdl::IExpression::EK_TEMPORARY) {
+    mi::base::Handle<const mdl::IExpression> resolved(resolve_temporary(
+        static_cast<const mdl::IExpression_temporary *>(source)->get_index()));
+    return translate_texture_return_field(resolved.get(), mono);
   }
-  if (!source || source->get_kind() != mdl::IExpression::EK_DIRECT_CALL)
+  if (function_scope_ && source->get_kind() == mdl::IExpression::EK_PARAMETER)
+    return with_bound_argument(
+        static_cast<const mdl::IExpression_parameter *>(source),
+        [this, mono](const mdl::IExpression *bound) {
+          return translate_texture_return_field(bound, mono);
+        });
+  if (source->get_kind() == mdl::IExpression::EK_CONSTANT) {
+    mi::base::Handle<const mdl::IValue> value(
+        static_cast<const mdl::IExpression_constant *>(source)->get_value());
+    if (!value || value->get_kind() != mdl::IValue::VK_STRUCT)
+      return {};
+    mi::base::Handle<const mdl::IValue> field(
+        static_cast<const mdl::IValue_struct *>(value.get())
+            ->get_field(mono ? "mono" : "tint"));
+    return field ? make_constant(field.get(), "texture_return") : MxExpression{};
+  }
+  if (source->get_kind() != mdl::IExpression::EK_DIRECT_CALL)
     return {};
   const auto *call =
-      static_cast<const mdl::IExpression_direct_call *>(source.get());
+      static_cast<const mdl::IExpression_direct_call *>(source);
   const char *name = call->get_definition();
   mi::base::Handle<const mdl::IFunction_definition> definition(
       name ? transaction_->access<mdl::IFunction_definition>(name) : nullptr);
   const char *mdl_name = definition ? definition->get_mdl_name() : nullptr;
+  if (definition && definition->get_semantic() ==
+                        mdl::IFunction_definition::DS_TERNARY) {
+    MxExpression condition = translate(argument(call, "cond").get());
+    MxExpression yes =
+        translate_texture_return_field(argument(call, "true_exp").get(), mono);
+    MxExpression no =
+        translate_texture_return_field(argument(call, "false_exp").get(), mono);
+    return conditional_expression(condition, yes, no);
+  }
+  if (definition && definition->get_semantic() ==
+                        mdl::IFunction_definition::DS_ELEM_CONSTRUCTOR &&
+      mdl_name && std::string(mdl_name).find("::base::texture_return(") == 0)
+    return translate(argument(call, mono ? "mono" : "tint").get());
   if (mdl_name &&
       std::string(mdl_name).find("::base::blend_color_layers(") == 0)
     return translate_color_layers(call, mono);
@@ -1067,6 +1181,12 @@ MxExpression ExpressionTranslator::translate_file_texture_field(
       std::string(mdl_name).find("::base::perlin_noise_texture(") == 0)
     return translate_perlin_texture(call, mono);
   if (!mdl_name || std::string(mdl_name).find("::base::file_texture(") != 0) {
+    MxExpression result = with_function_body(
+        call, definition.get(), [this, mono](const mdl::IExpression *body) {
+          return translate_texture_return_field(body, mono);
+        });
+    if (result.valid())
+      return result;
     report_.warn(material_ + ": unsupported texture_return source " +
                  (mdl_name ? mdl_name : "<unresolved>") + ".");
     return {};

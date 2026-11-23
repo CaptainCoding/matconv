@@ -1,0 +1,29 @@
+<materialx version="1.39">
+  <nodegraph name="first">
+    <input name="gain" type="float" value="0.2" />
+    <multiply name="square" type="float">
+      <input name="in1" type="float" interfacename="gain" />
+      <input name="in2" type="float" interfacename="gain" />
+    </multiply>
+    <output name="out" type="float" nodename="square" />
+  </nodegraph>
+  <nodegraph name="second">
+    <input name="gain" type="float" value="0.8" />
+    <multiply name="square" type="float">
+      <input name="in1" type="float" interfacename="gain" />
+      <input name="in2" type="float" interfacename="gain" />
+    </multiply>
+    <output name="out" type="float" nodename="square" />
+  </nodegraph>
+  <combine3 name="colors" type="color3">
+    <input name="in1" type="float" nodegraph="first" output="out" />
+    <input name="in2" type="float" nodegraph="second" output="out" />
+    <input name="in3" type="float" value="0.0" />
+  </combine3>
+  <standard_surface name="surface" type="surfaceshader">
+    <input name="base_color" type="color3" nodename="colors" />
+  </standard_surface>
+  <surfacematerial name="shared_graph_inputs" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="surface" />
+  </surfacematerial>
+</materialx>

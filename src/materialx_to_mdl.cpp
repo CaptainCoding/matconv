@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -23,6 +24,86 @@ namespace matconv::detail {
 namespace {
 
 namespace mx = MaterialX;
+
+class SharedGraphInputs final : public mx::ShaderGraphRefactor {
+public:
+  const std::string &getName() const override {
+    static const std::string name = "matconv_shared_graph_inputs";
+    return name;
+  }
+
+  size_t execute(mx::ShaderGraph &graph, mx::GenContext &) override {
+    if (graph.getParent())
+      return 0;
+    std::map<std::string, std::vector<mx::ShaderInput *>> groups;
+    std::set<std::string> reserved_names;
+    for (mx::ShaderNode *node : graph.getNodes()) {
+      for (mx::ShaderInput *input : node->getInputs()) {
+        if (input->getConnection() || input->getType().isClosure() ||
+            !node->isEditable(*input))
+          continue;
+        reserved_names.insert(node->getName() + "_" + input->getName());
+        if (input->getPath().empty())
+          continue;
+        mx::ElementPtr element =
+            graph.getDocument()->getDescendant(input->getPath());
+        mx::InputPtr source = element ? element->asA<mx::Input>() : nullptr;
+        mx::NodeGraphPtr source_graph =
+            source && source->getParent()
+                ? source->getParent()->asA<mx::NodeGraph>()
+                : nullptr;
+        if (source_graph && source_graph->getNodeDefString().empty())
+          groups[input->getPath()].push_back(input);
+      }
+    }
+
+    size_t edits = 0;
+    for (const auto &[path, inputs] : groups) {
+      if (inputs.size() < 2)
+        continue;
+      mx::ShaderInput *first = inputs.front();
+      bool compatible = true;
+      for (const mx::ShaderInput *input : inputs) {
+        if (input->getType() != first->getType() ||
+            input->isUniform() != first->isUniform() ||
+            input->getValueString() != first->getValueString() ||
+            input->getUnit() != first->getUnit() ||
+            input->getColorSpace() != first->getColorSpace() ||
+            input->getGeomProp() != first->getGeomProp()) {
+          compatible = false;
+          break;
+        }
+      }
+      if (!compatible) {
+        std::cerr << "Warning: MaterialX graph input " << path
+                  << " has incompatible generated uses; MDL parameters "
+                     "remain separate.\n";
+        continue;
+      }
+      mx::ElementPtr source = graph.getDocument()->getDescendant(path);
+      const std::string base = source->getName();
+      std::string name = base;
+      size_t suffix = 1;
+      while (reserved_names.count(name) || graph.getInputSocket(name))
+        name = base + "_" + std::to_string(suffix++);
+      reserved_names.insert(name);
+      mx::ShaderGraphInputSocket *socket =
+          graph.addInputSocket(name, first->getType());
+      socket->setPath(path);
+      socket->setValue(first->getValue());
+      socket->setUnit(first->getUnit());
+      socket->setColorSpace(first->getColorSpace());
+      socket->setGeomProp(first->getGeomProp());
+      socket->setMetadata(first->getMetadata());
+      if (first->isUniform())
+        socket->setUniform();
+      for (mx::ShaderInput *input : inputs)
+        socket->makeConnection(input);
+      ++edits;
+    }
+    return edits;
+  }
+};
 
 void connect_standard_surface_thin_walled(const mx::DocumentPtr &document) {
   mx::NodeGraphPtr graph =
@@ -135,6 +216,7 @@ int materialx_to_mdl(const Options &options) {
                       search_path);
 
   const auto generator = mx::MdlShaderGenerator::create();
+  generator->registerRefactor(std::make_shared<SharedGraphInputs>());
   mx::GenContext context(generator);
   mx::DefaultColorManagementSystemPtr color_management =
       mx::DefaultColorManagementSystem::create(generator->getTarget());

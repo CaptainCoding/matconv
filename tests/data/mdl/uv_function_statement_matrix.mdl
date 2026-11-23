@@ -1,0 +1,45 @@
+mdl 1.7;
+
+import ::anno::*;
+import ::base::*;
+import ::df::*;
+import ::math::*;
+import ::tex::*;
+
+base::texture_coordinate_info map_uv(
+    float4x4 matrix, base::texture_coordinate_info source
+) [[ anno::noinline() ]] {
+    float3 p = source.position;
+    float4 transformed = matrix * float4(p.x, p.y, p.z, 1.0);
+    float4 first = matrix[0];
+    float4 second = matrix[1];
+    float3 u = math::normalize(source.tangent_u * first.x +
+                               source.tangent_v * first.y);
+    float3 v = math::normalize(source.tangent_u * second.x +
+                               source.tangent_v * second.y);
+    return base::texture_coordinate_info(
+        float3(transformed.x, transformed.y, transformed.z),
+        u, v, source.source_flags);
+}
+
+export material uv_function_statement_matrix(
+    float scale_u = 1.7, float scale_v = 2.3,
+    float angle = 0.4, float offset = 0.2
+) = let {
+    float s = math::sin(angle);
+    float c = math::cos(angle);
+    float4x4 scale = float4x4(
+        scale_u, 0.0, 0.0, 0.0, 0.0, scale_v, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0, offset, -offset, 0.0, 1.0);
+    float4x4 rotate = float4x4(
+        c, s, 0.0, 0.0, -s, c, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0);
+    base::texture_coordinate_info uv =
+        map_uv(scale * rotate, base::coordinate_source());
+    color sample = base::file_texture(
+        texture_2d("textures/checker.png", tex::gamma_linear), uvw: uv).tint;
+} in material(
+    surface: material_surface(scattering: df::diffuse_reflection_bsdf(tint: sample)),
+    geometry: material_geometry(normal: base::tangent_space_normal_texture(
+        texture_2d("textures/checker.png", tex::gamma_linear), uvw: uv))
+);

@@ -129,11 +129,31 @@ void connect_standard_surface_emission(
               "emission controls.");
 }
 
+void apply_geometry_normal(const MxExpression &normal,
+                           const mx::NodePtr &shader,
+                           const mx::NodePtr &default_normal,
+                           ConversionReport &report,
+                           const std::string &name) {
+  if (!normal.valid())
+    return;
+  for (const char *slot : {"normal", "coat_normal"}) {
+    mx::InputPtr input = shader->getInput(slot);
+    if (input->getConnectedNode() == default_normal) {
+      connect_expression(normal, input, report, name, "geometry.normal");
+    } else {
+      report.warn(name + ": geometry.normal could not be combined with the "
+                  "independent " + slot + " layer normal; the layer normal "
+                  "was retained.");
+    }
+  }
+}
+
 void add_backface(const mx::NodeGraphPtr &graph,
                   ExpressionTranslator &translator,
                   const mdl::ICompiled_material *compiled,
                   mx::NodePtr material, ConversionReport &report,
-                  const std::string &name) {
+                  const std::string &name,
+                  const MxExpression &geometry_normal) {
   mi::base::Handle<const mdl::IExpression> scattering(
       compiled->lookup_sub_expression("backface.scattering"));
   mi::base::Handle<const mdl::IExpression> emission(
@@ -144,6 +164,7 @@ void add_backface(const mx::NodeGraphPtr &graph,
 
   mx::NodePtr shader =
       create_standard_surface_shader(graph, "backface_surface_shader");
+  mx::NodePtr default_normal = shader->getInput("normal")->getConnectedNode();
   if (!is_neutral_expression(scattering.get())) {
     if (!translator.approximate_bsdf(scattering.get(), shader)) {
       shader->getInput("base")->setValueString("1.0");
@@ -154,6 +175,7 @@ void add_backface(const mx::NodeGraphPtr &graph,
   }
   connect_standard_surface_emission(translator, compiled, shader, report,
                                     name, "backface.emission");
+  apply_geometry_normal(geometry_normal, shader, default_normal, report, name);
 
   const std::string output_name =
       unique_element_name(graph, "backface_output");
@@ -248,7 +270,9 @@ void apply_material_ior(const mdl::ICompiled_material *compiled,
 void add_material(mx::DocumentPtr document,
                   const mdl::IFunction_definition *definition,
                   mdl::ITransaction *transaction,
-                  mdl::IMdl_factory *mdl_factory, const std::string &name,
+                  mdl::IMdl_factory *mdl_factory,
+                  mdl::IMdl_impexp_api *mdl_impexp, mdl::IScope *scope,
+                  const std::string &name,
                   TextureResourcePackager &texture_packager,
                   const std::filesystem::path &resource_directory,
                   ConversionReport &report) {
@@ -285,9 +309,11 @@ void add_material(mx::DocumentPtr document,
   mx::NodeGraphPtr graph = document->addNodeGraph(graph_name);
   mx::NodePtr surface =
       create_standard_surface_shader(graph, "surface_shader");
+  mx::NodePtr default_normal = surface->getInput("normal")->getConnectedNode();
 
   ExpressionTranslator translator(compiled.get(), transaction, graph, report,
-                                  name, texture_packager, resource_directory);
+                                  name, texture_packager, resource_directory,
+                                  mdl_factory, mdl_impexp, scope);
   mi::base::Handle<const mdl::IExpression> scattering(
       compiled->lookup_sub_expression("surface.scattering"));
   if (!translator.approximate_bsdf(scattering.get(), surface)) {
@@ -328,8 +354,8 @@ void add_material(mx::DocumentPtr document,
   material_surface->setNodeGraphString(graph_name);
   material_surface->setOutputString(output_name);
 
-  add_backface(graph, translator, compiled.get(), material, report, name);
   add_displacement(graph, translator, compiled.get(), material, report, name);
+  MxExpression geometry_normal;
   mi::base::Handle<const mdl::IExpression> normal_expression(
       compiled->lookup_sub_expression("geometry.normal"));
   if (!is_neutral_expression(normal_expression.get()) &&
@@ -342,13 +368,15 @@ void add_material(mx::DocumentPtr document,
                   ": geometry.normal reduced to the unmodified normal; "
                   "the translated layer normal is retained.");
     } else if (normal.valid() && normal.type == "vector3") {
-      connect_expression(normal, surface->getInput("normal"), report, name,
-                         "geometry.normal");
+      geometry_normal = normal;
     } else {
       report.warn(name +
                   ": geometry.normal could not be represented as a vector3.");
     }
   }
+  apply_geometry_normal(geometry_normal, surface, default_normal, report, name);
+  add_backface(graph, translator, compiled.get(), material, report, name,
+               geometry_normal);
   apply_material_ior(compiled.get(), translator, surface, report, name);
   report_unsupported_slot(compiled.get(), "volume.scattering", report, name);
   report_unsupported_slot(compiled.get(), "volume.absorption_coefficient",
@@ -458,7 +486,8 @@ int mdl_to_materialx(const Options &options) {
         continue;
 
       add_material(document, definition.get(), transaction.get(),
-                   mdl_factory.get(), name, texture_packager,
+                   mdl_factory.get(), mdl_impexp.get(), scope.get(), name,
+                   texture_packager,
                    std::filesystem::absolute(options.input).parent_path(),
                    report);
       ++emitted_materials;

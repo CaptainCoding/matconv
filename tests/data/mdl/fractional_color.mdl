@@ -1,0 +1,14 @@
+mdl 1.7;
+
+import ::df::*;
+import ::math::*;
+
+export material fractional_color(
+    float3 coordinates = float3(-0.25, 1.5, 2.75)
+) = material(
+    surface: material_surface(
+        scattering: df::diffuse_reflection_bsdf(
+            tint: color(math::frac(coordinates))
+        )
+    )
+);

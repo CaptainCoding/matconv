@@ -11,6 +11,22 @@
         "MATCONV_FETCH_DEPENDENCIES": "ON",
         "VCPKG_MANIFEST_FEATURES": "mdl-image-plugin"
       }
+    },
+    {
+      "name": "mdl-diagnostic-renderer",
+      "displayName": "MDL diagnostic renderer",
+      "description": "Build the optional adapted MDL Core renderer and its texture tests.",
+      "inherits": "mdl-with-image-plugin",
+      "binaryDir": "${sourceDir}/build/mdl-diagnostic-renderer",
+      "cacheVariables": {
+        "MATCONV_DIAGNOSTIC_RENDERER": "ON",
+        "MDL_BUILD_CORE_EXAMPLES": "ON",
+        "MDL_ENABLE_VULKAN_EXAMPLES": "OFF",
+        "MDL_ENABLE_CUDA_EXAMPLES": "OFF",
+        "MDL_ENABLE_QT_EXAMPLES": "OFF",
+        "MDL_ENABLE_D3D12_EXAMPLES": "OFF",
+        "VCPKG_MANIFEST_FEATURES": "mdl-image-plugin;diagnostic-renderer"
+      }
     }
   ]
 }

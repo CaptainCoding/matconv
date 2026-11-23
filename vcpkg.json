@@ -17,6 +17,13 @@
         "boost-unordered",
         "openimageio"
       ]
+    },
+    "diagnostic-renderer": {
+      "description": "OpenGL dependencies for the optional MDL diagnostic renderer",
+      "dependencies": [
+        "glew",
+        "glfw3"
+      ]
     }
   }
 }

@@ -1,0 +1,27 @@
+mdl 1.7;
+
+import ::base::*;
+import ::df::*;
+import ::tex::*;
+
+export material texture_return_conditional(
+    bool use_texture = true,
+    bool use_fallback = true,
+    color fallback_color = color(0.2, 0.4, 0.6),
+    float fallback_mono = 0.3
+) = let {
+    base::texture_return sample = use_texture
+        ? base::file_texture(
+            texture_2d("textures/checker.png", tex::gamma_linear),
+            mono_source: base::mono_average)
+        : (use_fallback
+            ? base::texture_return(fallback_color, fallback_mono)
+            : base::texture_return(color(0.9, 0.1, 0.2), 0.7));
+} in material(
+    surface: material_surface(
+        scattering: df::diffuse_reflection_bsdf(
+            tint: sample.tint,
+            roughness: sample.mono
+        )
+    )
+);

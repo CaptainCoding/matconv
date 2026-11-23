@@ -1,0 +1,16 @@
+mdl 1.7;
+
+import ::df::*;
+import ::math::*;
+
+export material scalar_vector_constructor(float value = -0.25) = material(
+    surface: material_surface(
+        scattering: df::diffuse_reflection_bsdf(
+            tint: color(math::frac(float3(
+                math::length(float2(value)),
+                math::length(float3(value)),
+                math::length(float4(value))
+            )))
+        )
+    )
+);

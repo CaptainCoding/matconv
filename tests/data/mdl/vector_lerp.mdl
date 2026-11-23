@@ -1,0 +1,20 @@
+mdl 1.7;
+
+import ::df::*;
+import ::math::*;
+
+export material vector_lerp(
+    float2 weight2 = float2(0.1, 0.9),
+    float3 weight3 = float3(0.2, 0.5, 0.8),
+    float4 weight4 = float4(-0.2, 0.3, 0.7, 1.2)
+) = material(
+    surface: material_surface(
+        scattering: df::diffuse_reflection_bsdf(
+            tint: color(float3(
+                math::length(math::lerp(float2(0.0), float2(1.0), weight2)),
+                math::length(math::lerp(float3(0.0), float3(1.0), weight3)),
+                math::length(math::lerp(float4(0.0), float4(1.0), weight4))
+            ))
+        )
+    )
+);

@@ -245,6 +245,8 @@ const char *math_node_category(mdl::IFunction_definition::Semantics semantic) {
     return "clamp";
   case S::DS_INTRINSIC_MATH_FLOOR:
     return "floor";
+  case S::DS_INTRINSIC_MATH_FRAC:
+    return "fract";
   case S::DS_INTRINSIC_MATH_CEIL:
     return "ceil";
   case S::DS_INTRINSIC_MATH_ROUND:

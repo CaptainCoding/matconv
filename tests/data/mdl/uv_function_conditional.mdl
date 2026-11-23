@@ -1,0 +1,33 @@
+mdl 1.7;
+
+import ::anno::*;
+import ::base::*;
+import ::df::*;
+import ::tex::*;
+
+base::texture_coordinate_info choose_uv(
+    bool use_first,
+    base::texture_coordinate_info first,
+    base::texture_coordinate_info second
+) [[ anno::noinline() ]] = use_first ? first : second;
+
+export material uv_function_conditional(bool use_first = true, float scale = 2.0) = let {
+    base::texture_coordinate_info source = base::coordinate_source();
+    base::texture_coordinate_info first = base::transform_coordinate(
+        float4x4(scale, 0.0, 0.0, 0.0,
+                 0.0, 3.0, 0.0, 0.0,
+                 0.0, 0.0, 1.0, 0.0,
+                 0.0, 0.0, 0.0, 1.0), source);
+    base::texture_coordinate_info second = base::transform_coordinate(
+        float4x4(1.0, 0.0, 0.0, 0.0,
+                 0.0, 1.0, 0.0, 0.0,
+                 0.0, 0.0, 1.0, 0.0,
+                 0.25, 0.5, 0.0, 1.0), source);
+    base::texture_coordinate_info uv = choose_uv(use_first, first, second);
+    color sample = base::file_texture(
+        texture_2d("textures/checker.png", tex::gamma_linear), uvw: uv).tint;
+} in material(
+    surface: material_surface(scattering: df::diffuse_reflection_bsdf(tint: sample)),
+    geometry: material_geometry(normal: base::tangent_space_normal_texture(
+        texture_2d("textures/checker.png", tex::gamma_linear), uvw: uv))
+);

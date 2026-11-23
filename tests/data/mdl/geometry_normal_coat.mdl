@@ -1,0 +1,33 @@
+mdl 1.7;
+
+import ::base::*;
+import ::df::*;
+import ::tex::*;
+
+export material geometry_normal_coat(uniform float strength = 0.6) = material(
+    thin_walled: true,
+    surface: material_surface(
+        scattering: df::color_custom_curve_layer(
+            normal_reflectivity: color(0.6),
+            grazing_reflectivity: color(1.0),
+            layer: df::weighted_layer(
+                weight: 0.2,
+                layer: df::microfacet_ggx_smith_bsdf(roughness_u: 0.4),
+                base: df::microfacet_ggx_smith_bsdf(
+                    roughness_u: 0.15,
+                    roughness_v: 0.08
+                )
+            )
+        )
+    ),
+    backface: material_surface(
+        scattering: df::diffuse_reflection_bsdf(tint: color(0.3))
+    ),
+    geometry: material_geometry(
+        normal: base::tangent_space_normal_texture(
+            texture_2d("textures/checker.png", tex::gamma_linear),
+            factor: strength,
+            uvw: base::coordinate_source()
+        )
+    )
+);

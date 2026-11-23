@@ -1,0 +1,43 @@
+mdl 1.7;
+
+import ::anno::*;
+import ::base::*;
+import ::df::*;
+import ::tex::*;
+
+base::texture_coordinate_info adjust_uv(
+    base::texture_coordinate_info source, float scale, float offset, bool flip
+) [[ anno::noinline() ]] {
+    float signed_scale = flip ? -scale : scale;
+    float3 position = source.position;
+    float3 tangent = flip ? -source.tangent_u : source.tangent_u;
+    return base::texture_coordinate_info(
+        float3(position.x * signed_scale + offset,
+               position.y * scale, position.z),
+        tangent, source.tangent_v, source.source_flags);
+}
+
+base::texture_coordinate_info nested_uv(
+    float offset, bool flip, base::texture_coordinate_info source, float scale
+) [[ anno::noinline() ]] =
+    adjust_uv(source, scale * 0.5, -offset, flip);
+
+export material uv_function_statement(
+    float scale = 2.0, float offset = 0.3, bool flip = false
+) = let {
+    base::texture_coordinate_info source = base::coordinate_source();
+    base::texture_coordinate_info first = adjust_uv(source, scale, offset, flip);
+    base::texture_coordinate_info second = nested_uv(offset, flip, source, scale);
+    color a = base::file_texture(
+        texture_2d("textures/checker.png", tex::gamma_linear), uvw: first).tint;
+    color b = base::file_texture(
+        texture_2d("textures/checker.png", tex::gamma_linear), uvw: second).tint;
+} in material(
+    surface: material_surface(scattering: df::diffuse_reflection_bsdf(
+        tint: a * 0.6 + b * 0.4)),
+    geometry: material_geometry(normal: base::tangent_space_normal_texture(
+        texture_2d("textures/checker.png", tex::gamma_linear), uvw: first))
+);
+
+export material uv_function_statement_variant() =
+    uv_function_statement(scale: 0.75, offset: -0.2, flip: true);
