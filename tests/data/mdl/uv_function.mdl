@@ -1,0 +1,41 @@
+mdl 1.7;
+
+import ::anno::*;
+import ::base::*;
+import ::df::*;
+import ::tex::*;
+
+base::texture_coordinate_info adjust_uv(
+    float4x4 transform,
+    base::texture_coordinate_info source
+) [[ anno::noinline() ]] =
+    base::transform_coordinate(transform, source);
+
+base::texture_coordinate_info nested_uv(
+    base::texture_coordinate_info source,
+    float4x4 transform
+) [[ anno::noinline() ]] = adjust_uv(transform, source);
+
+export material uv_function(float scale_u = 2.0, float offset_v = 0.25) = let {
+    float4x4 transform = float4x4(
+        scale_u, 0.0, 0.0, 0.0,
+        0.0, 3.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, offset_v, 0.0, 1.0
+    );
+    color sample = base::file_texture(
+        texture_2d("textures/checker.png", tex::gamma_linear),
+        uvw: nested_uv(base::coordinate_source(), transform)
+    ).tint;
+} in material(
+    surface: material_surface(
+        scattering: df::diffuse_reflection_bsdf(tint: sample)
+    ),
+    geometry: material_geometry(
+        normal: base::tangent_space_normal_texture(
+            texture_2d("textures/checker.png", tex::gamma_linear),
+            factor: 0.6,
+            uvw: nested_uv(base::coordinate_source(), transform)
+        )
+    )
+);

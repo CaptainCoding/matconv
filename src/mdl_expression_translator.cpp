@@ -125,6 +125,11 @@ MxExpression ExpressionTranslator::translate_constant(
 
 MxExpression ExpressionTranslator::translate_parameter(
     const mdl::IExpression_parameter *expression) {
+  if (function_scope_)
+    return with_bound_argument(expression,
+                               [this](const mdl::IExpression *argument) {
+                                 return translate(argument);
+                               });
   const auto found = parameter_names_.find(expression->get_index());
   if (found == parameter_names_.end()) {
     report_.warn(material_ +
@@ -142,6 +147,10 @@ MxExpression ExpressionTranslator::translate_parameter(
 MxExpression ExpressionTranslator::translate_temporary(
     const mdl::IExpression_temporary *expression) {
   const mi::Size index = expression->get_index();
+  if (function_scope_) {
+    mi::base::Handle<const mdl::IExpression> temporary(resolve_temporary(index));
+    return translate(temporary.get());
+  }
   const std::size_t scope_id =
       thin_films_.empty() ? 0 : thin_films_.front().scope_id;
   const auto key = std::make_pair(index, scope_id);
@@ -155,6 +164,13 @@ MxExpression ExpressionTranslator::translate_temporary(
   return result;
 }
 
+mi::base::Handle<const mdl::IExpression>
+ExpressionTranslator::resolve_temporary(mi::Size index) {
+  return mi::base::Handle<const mdl::IExpression>(
+      function_scope_ ? function_scope_->definition->get_temporary(index)
+                      : compiled_->get_temporary(index));
+}
+
 std::string
 ExpressionTranslator::enum_name(const mdl::IExpression *expression) {
   if (!expression)
@@ -163,9 +179,16 @@ ExpressionTranslator::enum_name(const mdl::IExpression *expression) {
     const auto *temporary =
         static_cast<const mdl::IExpression_temporary *>(expression);
     mi::base::Handle<const mdl::IExpression> value(
-        compiled_->get_temporary(temporary->get_index()));
+        resolve_temporary(temporary->get_index()));
     return enum_name(value.get());
   }
+  if (function_scope_ &&
+      expression->get_kind() == mdl::IExpression::EK_PARAMETER)
+    return with_bound_argument(
+        static_cast<const mdl::IExpression_parameter *>(expression),
+        [this](const mdl::IExpression *argument) {
+          return enum_name(argument);
+        });
   mi::base::Handle<const mdl::IValue> value;
   if (expression->get_kind() == mdl::IExpression::EK_CONSTANT) {
     value =

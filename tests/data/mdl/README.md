@@ -62,6 +62,8 @@ reverse direction.
 | `sheen_fabric.mdl` | Sheen reflection with a diffuse multiscatter BSDF |
 | `unsupported_color_layer.mdl` | Unsupported mode warning and propagation of failed expressions |
 | `uv_transform.mdl` | Parameterized scale, translation and matrix-product rotation |
+| `uv_function.mdl` | Nested expression-bodied UV functions with parameters and normal-map tangents |
+| `uv_function_unsupported.mdl` | Warning and UV0 fallback for a function body unavailable from the SDK |
 | `unsupported_uv.mdl` | Explicit UV0 fallback for spherical projection |
 | `normal_layer.mdl` | Tangent-space normal texture on a BSDF layer |
 | `normal_layer_uv.mdl` | Rotated and scaled UV coordinates with a normal texture |

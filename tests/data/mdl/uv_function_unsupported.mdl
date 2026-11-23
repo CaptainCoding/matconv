@@ -1,0 +1,23 @@
+mdl 1.7;
+
+import ::anno::*;
+import ::base::*;
+import ::df::*;
+import ::tex::*;
+
+base::texture_coordinate_info adjust_uv(
+    base::texture_coordinate_info source, bool use_source
+) [[ anno::noinline() ]] {
+    if (use_source)
+        return source;
+    return base::coordinate_source();
+}
+
+export material uv_function_unsupported(bool use_source = true) = let {
+    color sample = base::file_texture(
+        texture_2d("textures/checker.png", tex::gamma_linear),
+        uvw: adjust_uv(base::coordinate_source(), use_source)
+    ).tint;
+} in material(surface: material_surface(
+    scattering: df::diffuse_reflection_bsdf(tint: sample)
+));

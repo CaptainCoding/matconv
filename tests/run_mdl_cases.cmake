@@ -47,6 +47,8 @@ set(cases
     "sheen_fabric|<standard_surface"
     "unsupported_color_layer|<standard_surface"
     "uv_transform|<combine3 name=\"transformed_uv_"
+    "uv_function|<combine3 name=\"transformed_uv_"
+    "uv_function_unsupported|<image "
     "normal_layer|<normalmap "
     "normal_layer_uv|<normalmap "
     "normal_geometry|<normalmap "
@@ -204,9 +206,9 @@ foreach(case IN LISTS cases)
                 "Transformed texture did not preserve its UV connection.")
         endif()
     endif()
-    if(material STREQUAL "unsupported_uv")
+    if(material STREQUAL "unsupported_uv" OR material STREQUAL "uv_function_unsupported")
         if(NOT "${stdout}${stderr}" MATCHES "MaterialX's default UV0 is used")
-            message(FATAL_ERROR "Unsupported spherical projection was not reported.")
+            message(FATAL_ERROR "${material} UV fallback was not reported.")
         endif()
     endif()
     if(material STREQUAL "uv_transform")
@@ -222,6 +224,21 @@ foreach(case IN LISTS cases)
         endforeach()
         if("${stdout}${stderr}" MATCHES "MaterialX's default UV0 is used")
             message(FATAL_ERROR "uv_transform unexpectedly fell back to UV0.")
+        endif()
+        if(material STREQUAL "uv_function")
+            foreach(fragment IN ITEMS "interfacename=\"scale_u\""
+                    "interfacename=\"offset_v\"" "nodename=\"transformed_uv_"
+                    "nodename=\"uv_vector2_\"" "nodename=\"uv_tangent_"
+                    "nodedef=\"ND_normalmap_vector2\"")
+                string(FIND "${generated}" "${fragment}" found)
+                if(found EQUAL -1)
+                    message(FATAL_ERROR "uv_function is missing '${fragment}'.")
+                endif()
+            endforeach()
+            if("${stdout}${stderr}" MATCHES
+               "MaterialX's default UV0 is used|normal map tangent could not be represented")
+                message(FATAL_ERROR "uv_function lost coordinates or tangents.")
+            endif()
         endif()
     endif()
     if(material STREQUAL "normal_layer" OR material STREQUAL "normal_layer_uv" OR
@@ -657,6 +674,7 @@ foreach(case IN LISTS cases)
        material STREQUAL "metallic_diffuse_layer" OR
        material STREQUAL "color_layers" OR
        material STREQUAL "uv_transform" OR
+       material STREQUAL "uv_function" OR
        material STREQUAL "normal_layer" OR
        material STREQUAL "normal_layer_uv" OR
        material STREQUAL "normal_geometry" OR

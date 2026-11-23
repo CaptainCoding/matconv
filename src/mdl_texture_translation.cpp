@@ -12,6 +12,30 @@
 
 namespace matconv::detail::mdl_translation {
 
+MxExpression ExpressionTranslator::translate_uv_function(
+    const mdl::IExpression_direct_call *call,
+    const mdl::IFunction_definition *definition, bool tangent, bool u) {
+  if (definition->get_semantic() != mdl::IFunction_definition::DS_UNKNOWN)
+    return {};
+  const char *name = definition->get_mdl_name();
+  if (!name)
+    return {};
+  for (FunctionScope *scope = function_scope_; scope; scope = scope->parent) {
+    const char *active = scope->definition->get_mdl_name();
+    if (active && std::string(active) == name)
+      return {};
+  }
+  mi::base::Handle<const mdl::IExpression> body(definition->get_body());
+  mi::base::Handle<const mdl::IExpression_list> arguments(
+      call->get_arguments());
+  if (!body || !arguments)
+    return {};
+  FunctionScope scope{definition, arguments, function_scope_};
+  ScopeGuard guard(function_scope_, &scope);
+  return tangent ? texture_tangent(body.get(), u)
+                 : texture_coordinates(body.get());
+}
+
 std::optional<mi::Sint32> ExpressionTranslator::texture_coordinate_index(
     const mdl::IExpression *expression) {
   if (!expression)
@@ -20,9 +44,16 @@ std::optional<mi::Sint32> ExpressionTranslator::texture_coordinate_index(
     const auto *temporary =
         static_cast<const mdl::IExpression_temporary *>(expression);
     mi::base::Handle<const mdl::IExpression> value(
-        compiled_->get_temporary(temporary->get_index()));
+        resolve_temporary(temporary->get_index()));
     return texture_coordinate_index(value.get());
   }
+  if (function_scope_ &&
+      expression->get_kind() == mdl::IExpression::EK_PARAMETER)
+    return with_bound_argument(
+        static_cast<const mdl::IExpression_parameter *>(expression),
+        [this](const mdl::IExpression *argument) {
+          return texture_coordinate_index(argument);
+        });
 
   if (expression->get_kind() != mdl::IExpression::EK_DIRECT_CALL)
     return {};
@@ -69,11 +100,18 @@ ExpressionTranslator::matrix_component(const mdl::IExpression *expression,
   if (!expression || column >= 4 || row >= 4)
     return {};
   if (expression->get_kind() == mdl::IExpression::EK_TEMPORARY) {
-    mi::base::Handle<const mdl::IExpression> resolved(compiled_->get_temporary(
+    mi::base::Handle<const mdl::IExpression> resolved(resolve_temporary(
         static_cast<const mdl::IExpression_temporary *>(expression)
             ->get_index()));
     return matrix_component(resolved.get(), column, row);
   }
+  if (function_scope_ &&
+      expression->get_kind() == mdl::IExpression::EK_PARAMETER)
+    return with_bound_argument(
+        static_cast<const mdl::IExpression_parameter *>(expression),
+        [this, column, row](const mdl::IExpression *argument) {
+          return matrix_component(argument, column, row);
+        });
   if (expression->get_kind() == mdl::IExpression::EK_CONSTANT) {
     mi::base::Handle<const mdl::IValue> value(
         static_cast<const mdl::IExpression_constant *>(expression)
@@ -137,11 +175,18 @@ ExpressionTranslator::texture_coordinates(const mdl::IExpression *expression) {
   if (!expression)
     return {};
   if (expression->get_kind() == mdl::IExpression::EK_TEMPORARY) {
-    mi::base::Handle<const mdl::IExpression> resolved(compiled_->get_temporary(
+    mi::base::Handle<const mdl::IExpression> resolved(resolve_temporary(
         static_cast<const mdl::IExpression_temporary *>(expression)
             ->get_index()));
     return texture_coordinates(resolved.get());
   }
+  if (function_scope_ &&
+      expression->get_kind() == mdl::IExpression::EK_PARAMETER)
+    return with_bound_argument(
+        static_cast<const mdl::IExpression_parameter *>(expression),
+        [this](const mdl::IExpression *argument) {
+          return texture_coordinates(argument);
+        });
   if (expression->get_kind() != mdl::IExpression::EK_DIRECT_CALL)
     return {};
   const auto *call =
@@ -205,7 +250,7 @@ ExpressionTranslator::texture_coordinates(const mdl::IExpression *expression) {
     return result.type == "vector3" ? result : MxExpression{};
   }
   if (function.find("::base::transform_coordinate(") != 0)
-    return {};
+    return translate_uv_function(call, definition.get(), false, false);
   MxExpression source = texture_coordinates(argument(call, "coordinate").get());
   mi::base::Handle<const mdl::IExpression> matrix = argument(call, "transform");
   if (!source.valid() || !matrix)
@@ -252,11 +297,18 @@ ExpressionTranslator::texture_tangent(const mdl::IExpression *expression,
   if (!expression)
     return {};
   if (expression->get_kind() == mdl::IExpression::EK_TEMPORARY) {
-    mi::base::Handle<const mdl::IExpression> resolved(compiled_->get_temporary(
+    mi::base::Handle<const mdl::IExpression> resolved(resolve_temporary(
         static_cast<const mdl::IExpression_temporary *>(expression)
             ->get_index()));
     return texture_tangent(resolved.get(), u);
   }
+  if (function_scope_ &&
+      expression->get_kind() == mdl::IExpression::EK_PARAMETER)
+    return with_bound_argument(
+        static_cast<const mdl::IExpression_parameter *>(expression),
+        [this, u](const mdl::IExpression *argument) {
+          return texture_tangent(argument, u);
+        });
   if (expression->get_kind() != mdl::IExpression::EK_DIRECT_CALL)
     return {};
   const auto *call =
@@ -293,7 +345,7 @@ ExpressionTranslator::texture_tangent(const mdl::IExpression *expression,
     return {node, {}, "vector3"};
   }
   if (function.find("::base::transform_coordinate(") != 0)
-    return {};
+    return translate_uv_function(call, definition.get(), true, u);
   mi::base::Handle<const mdl::IExpression> coordinate =
       argument(call, "coordinate");
   mi::base::Handle<const mdl::IExpression> matrix = argument(call, "transform");

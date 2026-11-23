@@ -195,6 +195,50 @@ private:
   std::optional<mi::Sint32>
   texture_coordinate_index(const mdl::IExpression *expression);
 
+  struct FunctionScope {
+    const mdl::IFunction_definition *definition;
+    mi::base::Handle<const mdl::IExpression_list> arguments;
+    FunctionScope *parent;
+  };
+
+  class ScopeGuard {
+  public:
+    ScopeGuard(FunctionScope *&active, FunctionScope *scope)
+        : active_(active), previous_(active) {
+      active_ = scope;
+    }
+    ~ScopeGuard() { active_ = previous_; }
+    ScopeGuard(const ScopeGuard &) = delete;
+    ScopeGuard &operator=(const ScopeGuard &) = delete;
+
+  private:
+    FunctionScope *&active_;
+    FunctionScope *previous_;
+  };
+
+  template <typename F>
+  auto with_bound_argument(const mdl::IExpression_parameter *parameter, F f)
+      -> decltype(f(static_cast<const mdl::IExpression *>(nullptr))) {
+    if (!function_scope_ || !function_scope_->arguments)
+      return {};
+    const char *name =
+        function_scope_->definition->get_parameter_name(parameter->get_index());
+    if (!name)
+      return {};
+    mi::base::Handle<const mdl::IExpression> argument(
+        function_scope_->arguments->get_expression(name));
+    if (!argument)
+      return {};
+    ScopeGuard guard(function_scope_, function_scope_->parent);
+    return f(argument.get());
+  }
+
+  mi::base::Handle<const mdl::IExpression> resolve_temporary(mi::Size index);
+
+  MxExpression translate_uv_function(
+      const mdl::IExpression_direct_call *call,
+      const mdl::IFunction_definition *definition, bool tangent, bool u);
+
   MxExpression matrix_component(const mdl::IExpression *expression,
                                 mi::Size column, mi::Size row);
 
@@ -247,6 +291,7 @@ private:
   TextureResourcePackager &texture_packager_;
   std::filesystem::path resource_directory_;
   mi::Size node_index_ = 0;
+  FunctionScope *function_scope_ = nullptr;
   std::map<mi::Size, std::string> parameter_names_;
   std::set<mi::Size> warned_enum_parameters_;
   std::map<std::pair<mi::Size, std::size_t>, MxExpression> temporaries_;
